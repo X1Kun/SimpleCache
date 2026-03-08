@@ -63,6 +63,7 @@ kubectl port-forward svc/my-first-geecache-svc 9999:9999
 # 运行高并发压测脚本
 cd geecache-engine
 go run benchmark_test.go
+```
 
 <img width="1560" height="298" alt="image" src="https://github.com/user-attachments/assets/7db5bd61-849f-4bfa-8966-c2819e175692" />
 <img width="1538" height="306" alt="image" src="https://github.com/user-attachments/assets/8e6a822c-ad24-447f-bf94-4190e92b239e" />
