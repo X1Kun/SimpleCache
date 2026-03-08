@@ -33,3 +33,38 @@
 │   ├── api/               # CRD API 结构定义
 │   └── internal/          # Reconcile 调谐逻辑实现
 └── values.yaml            #  Helm / K8s 部署配置参数
+📊 性能压测报告 (Benchmark)
+在本地单机 Kubernetes (Kind) 环境下，针对 5 节点集群进行极限压测：
+
+吞吐量 (QPS)：单节点稳定吞吐量达 5000+ QPS。
+
+防穿透极限测试：发起 100,000 次随机并发请求，Bloom Filter 成功拦截 99,997 次无效请求，拦截率达 99.99%。
+
+防击穿极限测试：10,000 并发死磕单一热点 Key，回源 DB 查询次数稳定控制为 1 次，其余请求全部复用合并结果。
+
+💡 附：监控大屏截图
+(请在这里贴上你那张完美的 Grafana Hit/PeerFetch 监控图)
+
+🛠️ 快速开始
+1. 本地运行控制器
+Bash
+cd simplecache-operator
+make install
+make run
+2. 部署缓存集群
+Bash
+# 应用 CRD 实例与相关配置
+kubectl apply -f config/samples/xxx.yaml
+3. 执行基准测试
+Bash
+# 暴露 Service 端口
+kubectl port-forward svc/my-first-geecache-svc 9999:9999
+
+# 运行高并发压测脚本
+cd geecache-engine
+go run benchmark_test.go
+
+<img width="1560" height="298" alt="image" src="https://github.com/user-attachments/assets/7db5bd61-849f-4bfa-8966-c2819e175692" />
+<img width="1538" height="306" alt="image" src="https://github.com/user-attachments/assets/8e6a822c-ad24-447f-bf94-4190e92b239e" />
+<img width="1536" height="316" alt="image" src="https://github.com/user-attachments/assets/95853152-11a7-4cf9-9f1d-0e9560ebdf8f" />
+
