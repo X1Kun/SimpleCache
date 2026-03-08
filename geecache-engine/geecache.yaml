@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: geecache-svc
+spec:
+  # 无头服务,负责给每个 Pod 分配固定域名
+  clusterIP: None 
+  selector:
+    app: geecache
+  ports:
+    - port: 8001
+      name: peer
+    - port: 9999
+      name: api
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: geecache
+spec:
+   # 必须和上面的 Service 名字对齐
+  serviceName: "geecache-svc"
+  replicas: 3
+  selector:
+    matchLabels:
+      app: geecache
+  template:
+    metadata:
+      labels:
+        app: geecache
+    spec:
+      containers:
+      - name: cache
+        image: x1kun/geecache:v1
+        # 优先使用通过 kind load 导入的本地镜像
+        imagePullPolicy: IfNotPresent
+        # 在容器内开启 api 方便测试
+        command: ["./geecache-server", "-port=8001", "-api=1"]
+        env:
+        # 利用 K8s 的 Downward API 动态获取自己的 Pod 名字
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        # 动态拼接身份地址
+        - name: SELF_ADDR
+          value: "http://$(POD_NAME).geecache-svc.default.svc.cluster.local:8001"
+        # 把集群所有节点的稳定域名写死
+        - name: PEERS
+          value: "http://geecache-0.geecache-svc.default.svc.cluster.local:8001,http://geecache-1.geecache-svc.default.svc.cluster.local:8001,http://geecache-2.geecache-svc.default.svc.cluster.local:8001"

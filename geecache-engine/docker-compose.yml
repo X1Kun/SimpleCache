@@ -1,0 +1,34 @@
+# 服务
+services:
+  # 服务名
+  cache-1:
+    # 告诉 Docker 用当前目录的 Dockerfile 构建镜像
+    build: .     
+    # 容器名   
+    container_name: cache-1 
+    ports:
+      # 端口映射：[宿主机端口]:[容器内端口]
+      - "9999:9999"      
+    environment:
+      # 配置环境变量
+      - SELF_ADDR=http://cache-1:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    # 覆盖 Dockerfile 的 CMD，开启 api 模式，监听容器内的 8001
+    command: ["./geecache-server", "-port=8001", "-api=1"]
+
+  cache-2:
+    build: .
+    container_name: cache-2
+    # 这里没有 ports 端口映射，不对外暴露端口
+    environment:
+      - SELF_ADDR=http://cache-2:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    command: ["./geecache-server", "-port=8001"]
+
+  cache-3:
+    build: .
+    container_name: cache-3
+    environment:
+      - SELF_ADDR=http://cache-3:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    command: ["./geecache-server", "-port=8001"]

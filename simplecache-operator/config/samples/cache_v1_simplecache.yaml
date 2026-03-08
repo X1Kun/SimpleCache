@@ -1,0 +1,9 @@
+apiVersion: cache.x1kun.com/v1
+kind: SimpleCache
+metadata:
+  labels:
+    app.kubernetes.io/name: simplecache-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: simplecache-sample
+spec:
+  # TODO(user): Add fields here

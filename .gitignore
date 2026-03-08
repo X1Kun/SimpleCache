@@ -1,0 +1,15 @@
+cat <<EOF > .gitignore
+# 忽略特定的二进制文件
+geecache_server.exe
+*.exe
+
+# 忽略 Go 常见的编译产物和临时文件
+bin/
+*.test
+*.out
+
+# 忽略 K8s 和 Mac/Win 常见的临时文件
+.DS_Store
+.idea/
+.vscode/
+EOF

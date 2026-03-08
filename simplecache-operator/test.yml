@@ -1,0 +1,7 @@
+apiVersion: cache.x1kun.com/v1
+kind: SimpleCache
+metadata:
+  name: my-first-geecache
+spec:
+  size: 5
+  image: "x1kun/geecache:v3"
