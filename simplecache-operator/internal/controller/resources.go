@@ -61,6 +61,17 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		{Name: "CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.CacheBytes, 10)},
 		{Name: "TTL_SECONDS", Value: strconv.Itoa(int(cr.Spec.TTLSeconds))},
 	}
+	if cr.Spec.SourceSecret != "" {
+		env = append(env, corev1.EnvVar{Name: "SOURCE_MODE", Value: "postgres"})
+		for _, name := range []string{"DATABASE_URL", "CACHE_ADMIN_TOKEN"} {
+			env = append(env, corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: cr.Spec.SourceSecret},
+					Key:                  name,
+				},
+			}})
+		}
+	}
 	probe := func(path string) *corev1.Probe {
 		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
 			HTTPGet: &corev1.HTTPGetAction{Path: path, Port: intstr.FromInt32(9999), Scheme: corev1.URISchemeHTTP},

@@ -1,6 +1,8 @@
 # SimpleCache
 
-A read-only distributed cache written in Go, with a Kubernetes Operator. The engine supports reliable reads and atomic EndpointSlice membership; the Operator provides declarative resources, discovery permissions, probes, and rollout Status. The original dedicated Kind smoke passed locally; the expanded adversarial suite records its own results per run.
+A distributed loading cache written in Go, with a Kubernetes Operator. A read-mostly product-detail example uses PostgreSQL as the authoritative source, with authenticated writes and best-effort HTTP invalidation. The original immutable demo remains available. The engine supports bounded reads and atomic EndpointSlice membership; the Operator provides declarative resources, discovery permissions, probes, and rollout Status.
+
+See [Product cache walkthrough](docs/products.md) for the complete database → cache → update → broadcast invalidation → reload workflow, including consistency limits and a three-node Compose environment.
 
 See [Design](docs/design.md) for architecture and constraints, and [Plan](docs/plan.md) for remaining work.
 
@@ -11,6 +13,9 @@ See [Design](docs/design.md) for architecture and constraints, and [Plan](docs/p
 - Consistent-hash routing and single-hop HTTP/Protobuf peer reads.
 - Immutable routing snapshots, stable Pod identity independent of IP, and ready EndpointSlice discovery.
 - Separate SingleFlight groups for routing and actual source loads.
+- PostgreSQL source with bounded connection pooling; mutable sources disable startup Bloom filtering.
+- Authenticated product writes/deletes and explicit cache-only invalidation, with per-node broadcast results.
+- An invalidation epoch prevents old local loads from refilling cache and separates subsequent callers from old flights.
 - Bounded peer requests, local source fallback, and typed peer errors.
 - A shared per-process source concurrency limit; queueing counts toward the source deadline.
 - Health/readiness endpoints, request metrics, and graceful shutdown.
@@ -29,6 +34,7 @@ geecache-engine/
   internal/peer/        HTTP clients/handlers and atomic routing snapshots
   internal/discovery/   Ready EndpointSlice membership
   internal/demo/        Finite read-only source
+  internal/source/      PostgreSQL product source
   internal/telemetry/   Per-process Prometheus registry
   internal/diagnostics/ Separate-process manual investigation runner
 simplecache-operator/   Kubebuilder API, controller, and manifests
@@ -77,6 +83,9 @@ Known keys return their values. Missing keys return 404; empty or oversized keys
 | API_ADDR | 0.0.0.0:9999 |
 | DISCOVERY_MODE | static; kubernetes requires POD_NAME, POD_NAMESPACE, PEER_SERVICE |
 | DEBUG_ADDR | Disabled; explicit literal loopback IP and port required |
+| SOURCE_MODE | demo; postgres requires DATABASE_URL and CACHE_ADMIN_TOKEN |
+| DATABASE_URL | Unset; PostgreSQL connection string, never logged |
+| CACHE_ADMIN_TOKEN | Unset; shared bearer token for writes and peer invalidation |
 
 ## Kubernetes discovery
 
@@ -84,7 +93,7 @@ The informer selects every IPv4 EndpointSlice for PEER_SERVICE in POD_NAMESPACE,
 
 Readiness requires a first successful informer sync and valid publication, but does not wait for this Pod to appear in its own endpoints. An empty healthy set uses the local source. Discovery failures retain the last valid view; stale peer calls remain bounded and can fall back.
 
-The process needs namespace get/list/watch permissions for discovery.k8s.io/endpointslices. The Operator reconciles those permissions, a headless peer Service, an API ClusterIP Service, and the StatefulSet. Configure size/image/cacheBytes/ttlSeconds/resources through the CR. Scaling changes only replicas; image or cache settings can roll Pods. Allocated and immutable Kubernetes fields are preserved.
+The process needs namespace get/list/watch permissions for discovery.k8s.io/endpointslices. The Operator reconciles those permissions, a headless peer Service, an API ClusterIP Service, and the StatefulSet. Configure size/image/cacheBytes/ttlSeconds/resources through the CR. Optional sourceSecret selects PostgreSQL using a same-namespace Secret containing DATABASE_URL and CACHE_ADMIN_TOKEN; the controller does not read credentials. Scaling changes only replicas; image or cache settings can roll Pods. Allocated and immutable Kubernetes fields are preserved.
 
 ## Isolated Kubernetes smoke
 
@@ -157,7 +166,7 @@ make perf PERF_QUICK=1 PERF_SECONDS=1 PERF_REPEATS=1 # Functional smoke only
 This manual suite launches fresh diagnostic-server subprocesses and a separate
 diagnostic-bench load process. The fixture reuses the real cache/API/routing and
 shutdown path through app.RunWithSource, but it is not the deployed executable.
-Normal nodes still use the original immutable demo values and 100ms source delay.
+Nodes in demo mode use the original immutable values and 100ms source delay.
 All fixture ports are dynamically allocated on loopback; no existing cluster,
 container or fixed host port is modified. Only owned subprocesses are stopped.
 
@@ -199,11 +208,11 @@ CPU profiling while measuring an unprofiled baseline.
 
 ## Deadlines and consistency
 
-The API wait budget is 1500ms, shared routing work 1200ms, one peer request at most 300ms, and independent source work 800ms including queueing.
+The read API wait budget is 1500ms, shared routing work 1200ms, one peer read at most 1000ms, and independent source work 800ms including queueing. The peer budget allows an ordinary bounded cold load to finish before fallback. Fallback can still run out of the remaining route budget. Writes have a separate bounded lifecycle; see the product walkthrough.
 
 Caller cancellation stops that caller's wait. Shared work has its own bounded lifecycle. Source work may finish after a route times out and cache its successful result. Shutdown marks the server unready, drains active HTTP requests, then cancels shared work.
 
-The demo source contains Tom, Jack, Sam, and Auto-0 through Auto-9999 with a simulated 100ms delay. It is not a real database. There is no write API, replication protocol, persistence, or strong consistency guarantee. SingleFlight and source limits operate per process.
+The demo source contains Tom, Jack, Sam, and Auto-0 through Auto-9999 with a simulated 100ms delay. PostgreSQL mode persists product JSON and enables writes followed by best-effort invalidation. There is no replicated cache storage, durable notification log, or strong consistency guarantee. SingleFlight and source limits operate per process.
 
 Successful peer responses are not cached at the entry node. Fallback copies can remain until TTL or eviction. No current throughput or high-concurrency performance numbers are claimed.
 
@@ -212,5 +221,7 @@ Successful peer responses are not cached at the entry node. Fallback copies can 
 The root [CI workflow](.github/workflows/ci.yml) runs on main pushes, pull requests targeting main, and manual dispatch. Quality and Operator envtest are independent jobs. They cover formatting, vet, race/coverage, adversarial diagnostics/profiles, binaries, Compose parsing, generated-file consistency, and Kustomize rendering. Local validation reports/profiles and Operator coverage are uploaded even on failure.
 
 The separate [container workflow](.github/workflows/containers.yml) builds both images on main pushes or manual dispatch without publishing. Neither workflow starts Kind or runs heavy load tests.
+
+The PostgreSQL integration job initializes a dedicated database and verifies real persistence, three-node invalidation, manual invalidation after external writes, and deletion. Without SIMPLECACHE_TEST_DATABASE_URL, that integration test is explicitly skipped in local unit runs.
 
 Envtest uses an isolated API server/etcd and explicitly cleans child resources. It verifies the current controller contract, not deployed permissions, workload readiness, or real-cluster convergence. Both local images were built for the original successful Kind smoke. Hosted CI results remain separate evidence.

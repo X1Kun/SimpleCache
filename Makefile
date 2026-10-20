@@ -30,6 +30,7 @@ test-operator-ci:
 
 compose-config:
 	docker compose -f geecache-engine/docker-compose.yml config --quiet
+	docker compose -f deploy/products/compose.yaml config --quiet
 
 generated-check:
 	bash scripts/check-generated.sh

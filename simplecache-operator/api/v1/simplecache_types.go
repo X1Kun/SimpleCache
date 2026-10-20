@@ -30,6 +30,12 @@ type SimpleCacheSpec struct {
 	Size int32 `json:"size,omitempty"`
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
+	// SourceSecret selects PostgreSQL mode. The same-namespace Secret must
+	// contain DATABASE_URL and CACHE_ADMIN_TOKEN. Empty retains the read-only demo.
+	// Secret contents are consumed by Pods, never read by the controller.
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	SourceSecret string `json:"sourceSecret,omitempty"`
 	// +kubebuilder:default=67108864
 	// +kubebuilder:validation:Minimum=1048576
 	// +kubebuilder:validation:Maximum=134217728

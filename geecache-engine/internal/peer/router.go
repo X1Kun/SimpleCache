@@ -28,18 +28,23 @@ type Router struct {
 	selfID   string
 	client   *http.Client
 	timeout  time.Duration
+	token    string
 	updateMu sync.Mutex
 	state    atomic.Pointer[snapshot]
 }
 
 func NewRouter(selfID string, timeout time.Duration) *Router {
+	return NewRouterWithToken(selfID, timeout, "")
+}
+
+func NewRouterWithToken(selfID string, timeout time.Duration, token string) *Router {
 	if selfID == "" || timeout <= 0 {
 		panic("invalid router identity or timeout")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 32
-	r := &Router{selfID: selfID, timeout: timeout, client: &http.Client{
+	r := &Router{selfID: selfID, timeout: timeout, token: token, client: &http.Client{
 		Transport: transport, Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
@@ -74,7 +79,7 @@ func (r *Router) Update(input []Member) error {
 	next := &snapshot{ring: hashring.New(100, nil), clients: make(map[string]*Client), members: normalized}
 	for _, m := range normalized {
 		next.ring.Add(m.ID)
-		next.clients[m.ID] = &Client{address: m.Address, http: r.client, timeout: r.timeout}
+		next.clients[m.ID] = &Client{address: m.Address, http: r.client, timeout: r.timeout, token: r.token}
 	}
 	r.state.Store(next)
 	return nil

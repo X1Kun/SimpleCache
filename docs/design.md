@@ -31,7 +31,7 @@ Separate routing/source SingleFlight groups avoid recursive same-key waits. Call
 | --- | --- |
 | API wait | 1500ms |
 | Shared route | 1200ms |
-| One peer request | 300ms |
+| One peer read | 1000ms |
 | Source work, including slot wait | 800ms |
 | Concurrent Getter calls | 32 per process |
 
@@ -58,6 +58,9 @@ Initial informer sync and valid publication are readiness dependencies; self-end
 ## Cache, lifecycle, and metrics
 
 Bloom is built from the complete immutable key set before serving. Generic sources without that set disable it. Known keys must never be rejected; positive Bloom results still require lookup.
+
+Mutable sources always disable startup Bloom, even if they also expose Keys().
+The application only requires Getter; the complete immutable key set is optional.
 
 Default logical capacity is 64MiB and TTL 60s. Expiration is lazy; accounting covers key/value bytes, not RSS. Values are copied to isolate cached storage.
 
@@ -91,11 +94,44 @@ The controller now reconciles the dynamic discovery contract:
 
 Ready Status describes observed Kubernetes rollout, not simultaneous ring agreement. InvalidSpec, ResourceConflict and ReconcileFailed expose failures. Status patches occur only on actual changes. No external resources require a custom finalizer. Keep manual CR scaling until there is one authoritative autoscaling interface.
 
-New StatefulSets use Parallel management; existing compatible immutable policy/identity fields are preserved. Resource defaults respect explicitly smaller limits, and invalid request/limit combinations prevent workload creation. Managed Pod fields are merged without erasing API defaults or unrelated fields. Static PEERS and SELF_ADDR are removed from the cache environment.
+New StatefulSets use Parallel management; existing compatible immutable policy/identity fields are preserved. Resource defaults respect explicitly smaller limits, and invalid request/limit combinations prevent workload creation. Managed Pod fields are merged without erasing API defaults or unrelated fields. Static PEERS and SELF_ADDR are removed from the cache environment. Optional sourceSecret injects PostgreSQL mode and two Secret key references; removing it restores demo mode.
+
+## Product writes and invalidation
+
+PostgreSQL is the authoritative product source. PUT /api persists JSON and
+DELETE /api removes the database row; POST /invalidate only clears cached
+copies. All mutations require the configured shared bearer token.
+The write handler uses a lifecycle-owned 3s context: source work has an 800ms
+budget and broadcast a 1s budget. Caller disconnect does not cancel the
+post-commit broadcast. A write error can have an ambiguous commit outcome,
+so the handler attempts invalidation even then.
+
+Broadcast takes one immutable member snapshot, invalidates the initiating node
+even if absent from that snapshot, and uses up to eight workers to contact
+other members. Each peer performs local invalidation only; it never rebroadcasts.
+Results identify failed/timed-out targets. HTTP 200 means every target in this
+snapshot acknowledged; 202 means incomplete best-effort invalidation, with no
+background delivery promise. Neither response establishes global consensus.
+
+Each group has a mutex-protected epoch. Invalidation increments it and removes
+the requested key under the same lock used to validate source-result insertion.
+Both SingleFlight keys include the epoch, so calls beginning after local
+invalidation do not join pre-invalidation flights. Earlier callers may still
+receive their earlier results. The epoch is group-wide to avoid an unbounded
+per-key tombstone map: unrelated active loads may skip insertion or be repeated
+after an invalidation, while unrelated cached values remain intact.
+
+Notifications are not durable. Offline/undiscovered nodes, a crash between DB
+commit and broadcast, and overlapping reads/writes can expose stale data.
+In particular, per-node invalidation is not a simultaneous cluster barrier:
+an in-flight routed read can overlap another node's notification.
+TTL and bounded in-flight work limit retention of old results when writes stop,
+the source is current/reachable, and subsequent loads succeed. No read-after-write
+or linearizability guarantee is made. See [the walkthrough](products.md).
 
 ## Boundaries and evidence
 
-The demo source is read-only and identical across nodes, with 100ms simulated latency. There is no write API, replication, persistence, active migration, or strong consistency. SingleFlight and source limits are process-local. Membership converges eventually.
+The demo source is read-only and identical across nodes, with 100ms simulated latency. PostgreSQL mode supplies persistent mutable products, independently of cache memory. There is no cache replication, active migration, durable invalidation, or strong consistency. SingleFlight and source limits are process-local. Membership converges eventually.
 
 Unit/race tests and fake discovery validate local contracts. Envtest additionally checks real API defaulting, allocated-field preservation, Status, conflicts, scaling without template changes, and Manager child-watch repair. It does not prove deployed permissions or Pod networking. The original dedicated Kind smoke passed locally. Expanded Kind tests require error-free reads during scaling/Pod replacement and recovery from infeasible resource requests; each run reports actual outcomes. Local diagnostics measure logical capacity, hash movement, source limits and latency, with test-process profiles rather than a publicly exposed admin endpoint. Grafana provisioning and deployed-process profiling remain separate follow-up work.
 

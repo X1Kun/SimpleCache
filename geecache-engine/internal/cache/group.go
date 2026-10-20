@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/singleflight"
@@ -55,7 +57,11 @@ type Group struct {
 	bloom        *BloomFilter
 	routeFlight  singleflight.Group
 	originFlight singleflight.Group
-	opts         Options
+	// A group-wide epoch is a bounded-memory barrier. Invalidating a key also
+	// detaches outstanding flights for other keys, but leaves their cached values.
+	epochMu sync.Mutex
+	epoch   uint64
+	opts    Options
 }
 
 func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
@@ -114,8 +120,8 @@ func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) 
 	if err := ctx.Err(); err != nil {
 		return ByteView{}, false, err
 	}
-	if len(key) == 0 || len(key) > 256 {
-		return ByteView{}, false, ErrInvalidKey
+	if err := ValidateKey(key); err != nil {
+		return ByteView{}, false, err
 	}
 	if v, ok := g.mainCache.get(key); ok {
 		return v, true, nil
@@ -153,7 +159,8 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	if hit || err != nil {
 		return v, err
 	}
-	result := g.routeFlight.DoChan(key, func() (any, error) {
+	epoch := g.currentEpoch()
+	result := g.routeFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.RouteTimeout)
 		defer cancel()
 		if v, hit, err := g.lookup(work, key); hit || err != nil {
@@ -207,7 +214,8 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 	if hit || err != nil {
 		return v, err
 	}
-	result := g.originFlight.DoChan(key, func() (any, error) {
+	epoch := g.currentEpoch()
+	result := g.originFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.SourceTimeout)
 		defer cancel()
 		if v, hit, err := g.lookup(work, key); hit || err != nil {
@@ -250,8 +258,45 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 			return ByteView{}, err
 		}
 		view := ByteView{b: cloneBytes(value)}
-		g.mainCache.add(key, view, g.opts.TTL)
+		// Check and insert under the same lock as invalidation. A pre-invalidation
+		// reader may finish with its old value, but cannot repopulate the cache.
+		g.epochMu.Lock()
+		if epoch == g.epoch {
+			g.mainCache.add(key, view, g.opts.TTL)
+		}
+		g.epochMu.Unlock()
 		return view, nil
 	})
 	return await(ctx, result)
+}
+
+func ValidateKey(key string) error {
+	if len(key) == 0 || len(key) > 256 {
+		return ErrInvalidKey
+	}
+	return nil
+}
+
+// Invalidate removes a local copy and separates subsequent callers from both
+// old routing and old source flights. It never changes the source or forwards.
+func (g *Group) Invalidate(key string) error {
+	if err := ValidateKey(key); err != nil {
+		return err
+	}
+	g.epochMu.Lock()
+	g.epoch++
+	g.mainCache.remove(key)
+	g.epochMu.Unlock()
+	g.observe("invalidate", "ok", 0)
+	return nil
+}
+
+func (g *Group) currentEpoch() uint64 {
+	g.epochMu.Lock()
+	defer g.epochMu.Unlock()
+	return g.epoch
+}
+
+func flightKey(epoch uint64, key string) string {
+	return strconv.FormatUint(epoch, 10) + ":" + key
 }

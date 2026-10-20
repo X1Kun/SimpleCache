@@ -3,6 +3,7 @@ module github.com/X1Kun/simpleCache/geecache-engine
 go 1.25.3
 
 require (
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/sync v0.18.0
 	google.golang.org/protobuf v1.36.10
@@ -24,6 +25,9 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect

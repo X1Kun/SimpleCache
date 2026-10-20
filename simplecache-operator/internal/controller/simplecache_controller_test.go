@@ -80,6 +80,33 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
 	})
 
+	It("wires PostgreSQL Secret references and removes them when returning to demo mode", func() {
+		cr.Spec.SourceSecret = "product-source"
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		reconcileNow()
+		var sts appsv1.StatefulSet
+		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
+		env := map[string]corev1.EnvVar{}
+		for _, value := range sts.Spec.Template.Spec.Containers[0].Env {
+			env[value.Name] = value
+		}
+		Expect(env["SOURCE_MODE"].Value).To(Equal("postgres"))
+		for _, name := range []string{"DATABASE_URL", "CACHE_ADMIN_TOKEN"} {
+			Expect(env[name].Value).To(BeEmpty())
+			Expect(env[name].ValueFrom).NotTo(BeNil())
+			Expect(env[name].ValueFrom.SecretKeyRef.Name).To(Equal("product-source"))
+			Expect(env[name].ValueFrom.SecretKeyRef.Key).To(Equal(name))
+		}
+		getCR()
+		cr.Spec.SourceSecret = ""
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		reconcileNow()
+		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
+		for _, value := range sts.Spec.Template.Spec.Containers[0].Env {
+			Expect(value.Name).NotTo(BeElementOf("SOURCE_MODE", "DATABASE_URL", "CACHE_ADMIN_TOKEN"))
+		}
+	})
+
 	It("reconciles discovery resources, status and replica-only scaling", func() {
 		reconcileNow()
 		var headless, api corev1.Service

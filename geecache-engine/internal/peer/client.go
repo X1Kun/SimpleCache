@@ -26,6 +26,7 @@ type Client struct {
 	address string
 	http    *http.Client
 	timeout time.Duration
+	token   string
 }
 
 func (c *Client) Get(ctx context.Context, group, key string) ([]byte, error) {
