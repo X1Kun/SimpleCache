@@ -14,13 +14,21 @@ import (
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/demo"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/discovery"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
-func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metrics) http.Handler {
+const peerReadTimeout = time.Second
+
+func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metrics, options ...APIOptions) http.Handler {
+	var opts APIOptions
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	writable := opts.Store != nil && opts.Router != nil && opts.Token != ""
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -38,13 +46,22 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 				metrics.Observe("api", result, time.Since(start))
 			}
 		}()
-		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", "GET")
+		isWrite := writable && (r.Method == http.MethodPut || r.Method == http.MethodDelete)
+		if r.Method != http.MethodGet && !isWrite {
+			allow := "GET"
+			if writable {
+				allow = "GET, PUT, DELETE"
+			}
+			w.Header().Set("Allow", allow)
 			http.Error(w, "method not allowed", 405)
 			return
 		}
 		if !ready() {
 			http.Error(w, "not ready", 503)
+			return
+		}
+		if isWrite {
+			result = mutate(w, r, group, opts, metrics, false)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
@@ -58,24 +75,48 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 		w.Header().Set("Content-Type", "application/octet-stream")
 		_, _ = w.Write(value.ByteSlice())
 	})
+	if opts.Router != nil && opts.Token != "" {
+		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			if !ready() {
+				http.Error(w, "not ready", http.StatusServiceUnavailable)
+				return
+			}
+			mutate(w, r, group, opts, metrics, true)
+		})
+	}
 	if metrics != nil {
 		mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
 	}
 	return mux
 }
 func Run(ctx context.Context, c Config) error {
-	return RunWithSource(ctx, c, demo.New(100*time.Millisecond))
-}
-
-// Source supplies the complete immutable dataset used to initialize Bloom.
-type Source interface {
-	cache.Getter
-	Keys() []string
+	switch c.SourceMode {
+	case "", "demo":
+		return RunWithSource(ctx, c, demo.New(100*time.Millisecond))
+	case "postgres":
+		if c.DatabaseURL == "" || c.AdminToken == "" {
+			return errors.New("postgres mode requires DATABASE_URL and CACHE_ADMIN_TOKEN")
+		}
+		startup, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		source, err := postgres.Open(startup, c.DatabaseURL, int32(c.SourceConcurrency))
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		return RunWithSource(ctx, c, source)
+	default:
+		return errors.New("unsupported SOURCE_MODE")
+	}
 }
 
 // RunWithSource shares the real server lifecycle with the isolated diagnostic fixture.
-// Normal CLI startup always uses Run and its unchanged demo source.
-func RunWithSource(ctx context.Context, c Config, source Source) error {
+func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	if err := validateDebugAddr(c.DebugAddr); err != nil {
 		return err
 	}
@@ -88,15 +129,25 @@ func RunWithSource(ctx context.Context, c Config, source Source) error {
 	// The signal context controls shutdown; in-flight work survives the grace period.
 	work, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	router := peer.NewRouter(c.SelfID, 300*time.Millisecond)
+	router := peer.NewRouterWithToken(c.SelfID, peerReadTimeout, c.AdminToken)
 	defer router.Close()
 	if err := router.Update(c.Members); err != nil {
 		return err
 	}
 	metrics := telemetry.New()
 	metrics.Membership(len(router.Members()), false)
-	group := cache.NewGroup("scores", c.CacheBytes, source, cache.Options{
-		TTL: c.TTL, KnownKeys: source.Keys(), Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiter(c.SourceConcurrency), Observer: metrics,
+	var knownKeys []string
+	mutable, _ := source.(MutableSource)
+	// A mutable source must not use a startup-only key set.
+	if known, ok := source.(interface{ Keys() []string }); ok && mutable == nil {
+		knownKeys = known.Keys()
+	}
+	groupName := "scores"
+	if c.SourceMode == "postgres" {
+		groupName = "products"
+	}
+	group := cache.NewGroup(groupName, c.CacheBytes, source, cache.Options{
+		TTL: c.TTL, KnownKeys: knownKeys, Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiter(c.SourceConcurrency), Observer: metrics,
 	})
 	metrics.ObserveCache(group)
 	var watcher *discovery.Watcher
@@ -120,9 +171,10 @@ func RunWithSource(ctx context.Context, c Config, source Source) error {
 	}
 	var serving atomic.Bool
 	ready := func() bool { return serving.Load() && (watcher == nil || watcher.Ready()) }
-	servers := []*http.Server{{Addr: c.PeerAddr, Handler: peer.NewHandler(group), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second}}
+	servers := []*http.Server{{Addr: c.PeerAddr, Handler: peer.NewHandlerWithToken(c.AdminToken, group), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}}
 	if c.API {
-		servers = append(servers, &http.Server{Addr: c.APIAddr, Handler: APIHandler(group, ready, metrics), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second})
+		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work})
+		servers = append(servers, &http.Server{Addr: c.APIAddr, Handler: api, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second})
 	}
 	if c.DebugAddr != "" {
 		servers = append(servers, &http.Server{Addr: c.DebugAddr, Handler: DebugHandler(), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second})

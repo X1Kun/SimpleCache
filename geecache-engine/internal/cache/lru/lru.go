@@ -62,6 +62,13 @@ func (c *Cache) RemoveOldest() {
 	}
 }
 
+// Remove is idempotent and preserves logical byte accounting.
+func (c *Cache) Remove(key string) {
+	if e, ok := c.cache[key]; ok {
+		c.RemoveElement(e)
+	}
+}
+
 func (c *Cache) RemoveElement(ele *list.Element) {
 	c.ll.Remove(ele)
 	kv := ele.Value.(*entry)

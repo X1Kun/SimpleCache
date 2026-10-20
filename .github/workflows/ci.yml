@@ -49,6 +49,9 @@ jobs:
       - name: Validate Compose configuration
         run: make compose-config
 
+      - name: Verify fresh-volume PostgreSQL readiness
+        run: bash scripts/products/check-startup.sh
+
       - name: Validate generated files and render Kubernetes manifests
         run: |
           make generated-check
@@ -88,3 +91,34 @@ jobs:
           name: operator-validation
           path: bin/reports/
           if-no-files-found: ignore
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: simplecache
+          POSTGRES_PASSWORD: integration-only-password
+          POSTGRES_DB: simplecache
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U simplecache -d simplecache"
+          --health-interval 2s --health-timeout 2s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: geecache-engine/go.mod
+          cache-dependency-path: geecache-engine/go.sum
+      - name: Initialize isolated product schema
+        env:
+          PGPASSWORD: integration-only-password
+        run: psql -h 127.0.0.1 -U simplecache -d simplecache -v ON_ERROR_STOP=1 -f deploy/products/schema.sql
+      - name: Verify PostgreSQL startup, writes and three-node invalidation
+        working-directory: geecache-engine
+        env:
+          SIMPLECACHE_TEST_DATABASE_URL: postgres://simplecache:integration-only-password@127.0.0.1:5432/simplecache?sslmode=disable
+        run: go test -race -count=1 -timeout=2m -run '^TestPostgres(OpenChecksExecutionErrors|ProductLifecycle)$' -v ./internal/source/postgres ./internal/app

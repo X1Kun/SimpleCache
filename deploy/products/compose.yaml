@@ -1,0 +1,60 @@
+name: simplecache-products
+
+x-cache: &cache
+  image: ${PRODUCT_CACHE_IMAGE:-simplecache-products:local}
+  build:
+    context: ../../geecache-engine
+  command: ["./geecache-server", "-port=8001", "-api=true"]
+  depends_on:
+    postgres:
+      condition: service_healthy
+  mem_limit: 256m
+
+x-env: &env
+  SOURCE_MODE: postgres
+  DATABASE_URL: postgres://simplecache:learning-only-password@postgres:5432/simplecache?sslmode=disable
+  CACHE_ADMIN_TOKEN: ${CACHE_ADMIN_TOKEN:-learning-only-token}
+  CACHE_BYTES: "16777216"
+  TTL_SECONDS: "60"
+  PEERS: http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: simplecache
+      POSTGRES_PASSWORD: learning-only-password
+      POSTGRES_DB: simplecache
+    volumes:
+      - products:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    ports:
+      - "127.0.0.1:${PRODUCT_DB_PORT:-0}:5432"
+    healthcheck:
+      # The initialization server only listens on a Unix socket. TCP becomes
+      # available after all entrypoint initialization scripts have finished.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U simplecache -d simplecache"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  cache-1:
+    <<: *cache
+    environment:
+      <<: *env
+      SELF_ADDR: http://cache-1:8001
+    ports:
+      - "127.0.0.1:${PRODUCT_API_PORT:-19999}:9999"
+  cache-2:
+    <<: *cache
+    environment:
+      <<: *env
+      SELF_ADDR: http://cache-2:8001
+  cache-3:
+    <<: *cache
+    environment:
+      <<: *env
+      SELF_ADDR: http://cache-3:8001
+
+volumes:
+  products:

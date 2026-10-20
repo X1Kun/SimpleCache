@@ -14,6 +14,14 @@ type cache struct {
 	evictions  uint64
 }
 
+func (c *cache) remove(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru != nil {
+		c.lru.Remove(key)
+	}
+}
+
 // add inserts an entry while holding the cache lock.
 // Initialize the LRU lazily, then insert the value.
 func (c *cache) add(key string, value ByteView, ttl time.Duration) {

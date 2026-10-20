@@ -119,6 +119,13 @@ spec:
                 maximum: 10
                 minimum: 1
                 type: integer
+              sourceSecret:
+                description: |-
+                  SourceSecret selects PostgreSQL mode. The same-namespace Secret must
+                  contain DATABASE_URL and CACHE_ADMIN_TOKEN. Empty retains the read-only demo.
+                  Secret contents are consumed by Pods, never read by the controller.
+                maxLength: 253
+                type: string
               ttlSeconds:
                 default: 60
                 format: int32

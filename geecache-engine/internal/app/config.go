@@ -22,6 +22,7 @@ type Config struct {
 	Members                                  []peer.Member
 	DebugAddr                                string
 	ProfileContention                        bool
+	SourceMode, DatabaseURL, AdminToken      string
 }
 
 func FromEnv(port int, api bool) (Config, error) {
@@ -34,6 +35,17 @@ func FromEnv(port int, api bool) (Config, error) {
 	}
 	if c.DiscoveryMode == "" {
 		c.DiscoveryMode = "static"
+	}
+	c.SourceMode = os.Getenv("SOURCE_MODE")
+	if c.SourceMode == "" {
+		c.SourceMode = "demo"
+	}
+	c.DatabaseURL, c.AdminToken = os.Getenv("DATABASE_URL"), os.Getenv("CACHE_ADMIN_TOKEN")
+	if c.SourceMode != "demo" && c.SourceMode != "postgres" {
+		return c, fmt.Errorf("unsupported SOURCE_MODE")
+	}
+	if c.SourceMode == "postgres" && (c.DatabaseURL == "" || c.AdminToken == "") {
+		return c, fmt.Errorf("postgres mode requires DATABASE_URL and CACHE_ADMIN_TOKEN")
 	}
 	if v := os.Getenv("API_ADDR"); v != "" {
 		c.APIAddr = v

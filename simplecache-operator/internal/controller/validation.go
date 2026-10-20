@@ -6,10 +6,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 	cachev1 "x1kun.com/simplecache-operator/api/v1"
 )
 
 func validateSpec(cr *cachev1.SimpleCache) error {
+	if cr.Spec.SourceSecret != "" && len(validation.IsDNS1123Subdomain(cr.Spec.SourceSecret)) != 0 {
+		return fmt.Errorf("sourceSecret must be a valid Secret name")
+	}
 	if strings.TrimSpace(cr.Spec.Image) == "" || cr.Spec.Size < 1 || cr.Spec.Size > 10 || cr.Spec.CacheBytes < 1<<20 || cr.Spec.CacheBytes > 128<<20 || cr.Spec.TTLSeconds < 1 || cr.Spec.TTLSeconds > 3600 {
 		return fmt.Errorf("image, replica count, cache capacity or TTL is invalid")
 	}

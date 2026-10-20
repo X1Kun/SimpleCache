@@ -2,6 +2,31 @@
 
 Focus: Go distributed-system reliability and Kubernetes platform engineering. Retain the current project and existing English documentation/CI. The current scope is a one-to-two-week functional and diagnostic pass.
 
+## Product cache learning loop (2026-10-20)
+
+The [product walkthrough](products.md) now connects an external PostgreSQL source
+to the existing cache: read → update/delete source → best-effort HTTP invalidation
+→ reload. The immutable demo and its diagnostics remain available independently.
+An optional Operator sourceSecret wires the database and shared mutation token.
+
+Local validation passed: full engine race tests, real PostgreSQL with three HTTP
+peers, Operator envtest (controller statement coverage 86.9%), Operator lint,
+engine vet, generated-file comparison, Kubernetes rendering and Compose parsing.
+The separate CI PostgreSQL job is configured; hosted CI was not run in this session.
+
+A dedicated three-cache-container plus PostgreSQL smoke also passed: three
+sequential entry-node reads of one cold key caused one actual source load;
+committed updates invalidated all known copies; a stopped peer produced HTTP 202
+with source_committed=true; restarting it and explicitly retrying invalidation
+recovered; deletion removed the database row and subsequent reads returned 404.
+These are functional observations, not throughput or strong-consistency claims.
+
+Remaining boundaries are intentional: group-wide invalidation epochs can suppress
+unrelated in-flight fills; notifications are not durable; discovery is eventually
+consistent; concurrent readers may observe old results; TTL remains the fallback.
+Further work should measure a representative workload before adding durable event
+delivery, hot replicas, or a more granular invalidation mechanism.
+
 ## Progress
 
 | Work | State |
