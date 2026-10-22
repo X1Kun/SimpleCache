@@ -21,13 +21,46 @@ with source_committed=true; restarting it and explicitly retrying invalidation
 recovered; deletion removed the database row and subsequent reads returned 404.
 These are functional observations, not throughput or strong-consistency claims.
 
-Remaining boundaries are intentional: group-wide invalidation epochs can suppress
-unrelated in-flight fills; notifications are not durable; discovery is eventually
-consistent; concurrent readers may observe old results; TTL remains the fallback.
-Further work should measure a representative workload before adding durable event
-delivery, hot replicas, or a more granular invalidation mechanism.
+At that milestone, group-wide epochs could suppress unrelated in-flight fills
+(now narrowed to fixed stripes). Notifications are not durable; discovery is
+eventually consistent; concurrent readers may observe old results; TTL remains the fallback.
+Workload comparisons and bounded opt-in hot replicas are described below.
+Durable event delivery remains outside this scope.
 
 ## Progress
+
+The [PostgreSQL paired workload comparison](postgres-comparison.md) was added on
+2026-10-22. `make postgres-compare` now runs independent/coordinated three-node
+fixtures across cold-key, capacity, update and stopped-owner scenarios, with
+paired deterministic traces, real persistent source reads and per-node metrics.
+The default three-repeat run passed all 24 trials with zero read errors or wrong
+values. In the post-warmup capacity stage, median source loads were 3,072 versus
+zero, while P95 medians were 2.064ms versus 2.157ms. This establishes a source-work
+benefit for the configured trace; it does not establish a general latency gain.
+CI is configured to run the explicit quick functional smoke; hosted results are
+separate. Kubernetes product-workload validation remains the next distinct step.
+
+### Evidence-led cache changes (2026-10-22)
+
+The suite now adds deterministic Zipf reads and overlapping 95/5 read/write
+windows, plus single-epoch and opt-in hot-replica controls. The final three-repeat
+run `20261022T074739Z-postgres-compare-takb8Znb` passed all 45 trials and 101,412
+measured reads. With unchanged total logical cache budgets, the hot-read paired
+median peer count fell from 4,670 to 1,617 and stage Go allocations from 223.58 to
+97.48MiB; P95 changed from 2.051 to 1.493ms. These are bounded loopback trace
+observations, not production throughput or strong-consistency claims.
+
+HTTP responses use ByteView.WriteTo to avoid a defensive slice copy. Fixed 256
+invalidation stripes retain bounded metadata and narrow unrelated-fill fencing;
+the current real-DB mixed test showed no source-load improvement for stripes.
+Optional HOT_CACHE_BYTES/spec.hotCacheBytes reserves existing capacity for
+peer replicas, with inherited expiry, a one-second upper TTL and invalidation
+generation checks. It defaults to zero. Oversized entries no longer flush
+unrelated entries. See [comparison evidence](postgres-comparison.md) for tradeoffs.
+
+Deferred: durable invalidation/replay, global consistency and deployed hot-replica
+behavior during topology changes. Do not add these without a concrete workload
+or failure requirement. Existing Kubernetes clusters were not changed by this pass.
 
 | Work | State |
 | --- | --- |

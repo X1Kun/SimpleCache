@@ -17,6 +17,9 @@ func validateSpec(cr *cachev1.SimpleCache) error {
 	if strings.TrimSpace(cr.Spec.Image) == "" || cr.Spec.Size < 1 || cr.Spec.Size > 10 || cr.Spec.CacheBytes < 1<<20 || cr.Spec.CacheBytes > 128<<20 || cr.Spec.TTLSeconds < 1 || cr.Spec.TTLSeconds > 3600 {
 		return fmt.Errorf("image, replica count, cache capacity or TTL is invalid")
 	}
+	if cr.Spec.HotCacheBytes < 0 || cr.Spec.HotCacheBytes >= cr.Spec.CacheBytes {
+		return fmt.Errorf("hotCacheBytes must be nonnegative and below cacheBytes")
+	}
 	for name, q := range cr.Spec.Resources.Requests {
 		if q.Sign() < 0 {
 			return fmt.Errorf("negative request for %s", name)

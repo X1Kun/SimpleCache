@@ -78,6 +78,7 @@ Known keys return their values. Missing keys return 404; empty or oversized keys
 | Environment variable | Default |
 | --- | --- |
 | CACHE_BYTES | 64MiB of logical key/value bytes |
+| HOT_CACHE_BYTES | 0 (disabled); reserves part of CACHE_BYTES for peer replicas, at most 1s TTL |
 | TTL_SECONDS | 60 |
 | SOURCE_MAX_CONCURRENCY | 32 per process |
 | API_ADDR | 0.0.0.0:9999 |
@@ -93,7 +94,7 @@ The informer selects every IPv4 EndpointSlice for PEER_SERVICE in POD_NAMESPACE,
 
 Readiness requires a first successful informer sync and valid publication, but does not wait for this Pod to appear in its own endpoints. An empty healthy set uses the local source. Discovery failures retain the last valid view; stale peer calls remain bounded and can fall back.
 
-The process needs namespace get/list/watch permissions for discovery.k8s.io/endpointslices. The Operator reconciles those permissions, a headless peer Service, an API ClusterIP Service, and the StatefulSet. Configure size/image/cacheBytes/ttlSeconds/resources through the CR. Optional sourceSecret selects PostgreSQL using a same-namespace Secret containing DATABASE_URL and CACHE_ADMIN_TOKEN; the controller does not read credentials. Scaling changes only replicas; image or cache settings can roll Pods. Allocated and immutable Kubernetes fields are preserved.
+The process needs namespace get/list/watch permissions for discovery.k8s.io/endpointslices. The Operator reconciles those permissions, a headless peer Service, an API ClusterIP Service, and the StatefulSet. Configure size/image/cacheBytes/hotCacheBytes/ttlSeconds/resources through the CR. Optional sourceSecret selects PostgreSQL using a same-namespace Secret containing DATABASE_URL and CACHE_ADMIN_TOKEN; the controller does not read credentials. Scaling changes only replicas; image or cache settings can roll Pods. Allocated and immutable Kubernetes fields are preserved.
 
 ## Isolated Kubernetes smoke
 
@@ -154,6 +155,16 @@ saved for diagnosis.
 Logical cache bytes, capacity, entries and removals are exposed as metrics.
 Logical bytes exclude Go object overhead and RSS; removals include lazy expiry.
 No throughput improvement is claimed without a comparable measured change.
+
+## PostgreSQL workload comparison
+
+For the real PostgreSQL three-node comparison, run `make postgres-compare`
+(`COMPARE_QUICK=1` for a functional smoke). It compares independent and
+hash-coordinated reads under equal cache budgets across cold-key, capacity,
+update, stopped-owner, Zipf hot-read and overlapping 95/5 read/write scenarios.
+Additional controls compare fixed epoch stripes and opt-in hot replicas with
+the same total cache budget. See [PostgreSQL comparison](docs/postgres-comparison.md)
+for measurement limits, isolated database/process lifecycle and per-run reports.
 
 ## Separate-process performance investigation
 

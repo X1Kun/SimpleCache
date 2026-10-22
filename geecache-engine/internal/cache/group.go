@@ -29,6 +29,17 @@ func (f GetterFunc) Get(ctx context.Context, key string) ([]byte, error) { retur
 type PeerGetter interface {
 	Get(context.Context, string, string) ([]byte, error)
 }
+
+// ExpiringPeerGetter is optional. Legacy responses remain readable but cannot
+// be mirrored without an owner-provided remaining lifetime.
+type ExpiringPeerGetter interface {
+	GetWithExpiry(context.Context, string, string) (PeerValue, error)
+}
+
+type PeerValue struct {
+	Value     []byte
+	ExpiresAt time.Time
+}
 type PeerPicker interface {
 	PickPeer(string) (PeerGetter, bool)
 }
@@ -48,19 +59,25 @@ type Options struct {
 	Peers         PeerPicker
 	Lifecycle     context.Context
 	Observer      Observer
+	// EpochBuckets defaults to 256. One reproduces the former group-wide
+	// invalidation barrier for controlled diagnostic comparisons.
+	EpochBuckets  int
+	HotCacheBytes int64
+	HotTTL        time.Duration
 }
 
 type Group struct {
 	name         string
 	getter       Getter
 	mainCache    cache
+	hotCache     cache
 	bloom        *BloomFilter
 	routeFlight  singleflight.Group
 	originFlight singleflight.Group
-	// A group-wide epoch is a bounded-memory barrier. Invalidating a key also
-	// detaches outstanding flights for other keys, but leaves their cached values.
+	// Fixed stripes bound metadata memory without fencing every unrelated key.
+	// Hash collisions conservatively fence other in-flight loads in that stripe.
 	epochMu sync.Mutex
-	epoch   uint64
+	epochs  [256]uint64
 	opts    Options
 }
 
@@ -86,7 +103,20 @@ func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
 	if opts.Limiter == nil {
 		opts.Limiter = NewSourceLimiter(32)
 	}
-	g := &Group{name: name, getter: getter, mainCache: cache{cacheBytes: capacity}, opts: opts}
+	if opts.EpochBuckets == 0 {
+		opts.EpochBuckets = 256
+	}
+	if opts.EpochBuckets < 1 || opts.EpochBuckets > 256 || opts.EpochBuckets&(opts.EpochBuckets-1) != 0 {
+		panic("epoch buckets must be a power of two between 1 and 256")
+	}
+	if opts.HotCacheBytes < 0 || opts.HotCacheBytes >= capacity || opts.HotTTL < 0 {
+		panic("invalid hot-cache budget or TTL")
+	}
+	if opts.HotTTL == 0 {
+		opts.HotTTL = time.Second
+	}
+	opts.HotTTL = min(opts.HotTTL, opts.TTL, time.Second)
+	g := &Group{name: name, getter: getter, mainCache: cache{cacheBytes: capacity - opts.HotCacheBytes}, hotCache: cache{cacheBytes: opts.HotCacheBytes}, opts: opts}
 	if opts.KnownKeys != nil {
 		g.bloom = newBloomForKeys(opts.KnownKeys)
 	}
@@ -95,7 +125,18 @@ func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
 func (g *Group) Name() string { return g.name }
 
 // Stats returns a synchronized snapshot of logical cache storage.
-func (g *Group) Stats() Stats { return g.mainCache.stats() }
+func (g *Group) Stats() Stats {
+	s := g.mainCache.stats()
+	if g.opts.HotCacheBytes > 0 {
+		h := g.hotCache.stats()
+		s.Bytes += h.Bytes
+		s.Capacity += h.Capacity
+		s.Entries += h.Entries
+		s.Removals += h.Removals
+		s.HotBytes, s.HotCapacity, s.HotEntries = h.Bytes, h.Capacity, h.Entries
+	}
+	return s
+}
 
 func (g *Group) observe(operation, result string, elapsed time.Duration) {
 	if g.opts.Observer != nil {
@@ -125,6 +166,12 @@ func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) 
 	}
 	if v, ok := g.mainCache.get(key); ok {
 		return v, true, nil
+	}
+	if g.opts.HotCacheBytes > 0 {
+		if v, ok := g.hotCache.get(key); ok {
+			g.observe("hot_hit", "ok", 0)
+			return v, true, nil
+		}
 	}
 	if g.bloom != nil && !g.bloom.Contains(key) {
 		g.observe("bloom", "rejected", 0)
@@ -159,7 +206,7 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	if hit || err != nil {
 		return v, err
 	}
-	epoch := g.currentEpoch()
+	epoch := g.currentEpoch(key)
 	result := g.routeFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.RouteTimeout)
 		defer cancel()
@@ -169,13 +216,21 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 		if g.opts.Peers != nil {
 			if peer, ok := g.opts.Peers.PickPeer(key); ok {
 				start := time.Now()
-				value, err := peer.Get(work, g.name, key)
+				var value PeerValue
+				var err error
+				if expiring, ok := peer.(ExpiringPeerGetter); ok {
+					value, err = expiring.GetWithExpiry(work, g.name, key)
+				} else {
+					value.Value, err = peer.Get(work, g.name, key)
+				}
 				g.observe("peer", Result(err), time.Since(start))
 				if err == nil {
-					if len(value) > MaxValueBytes {
+					if len(value.Value) > MaxValueBytes {
 						err = ErrValueTooLarge
 					} else {
-						return ByteView{b: cloneBytes(value)}, nil
+						view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt}
+						g.populateHot(key, view, epoch)
+						return view, nil
 					}
 				}
 				if errors.Is(err, ErrNotFound) {
@@ -214,7 +269,7 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 	if hit || err != nil {
 		return v, err
 	}
-	epoch := g.currentEpoch()
+	epoch := g.currentEpoch(key)
 	result := g.originFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.SourceTimeout)
 		defer cancel()
@@ -261,10 +316,17 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 		// Check and insert under the same lock as invalidation. A pre-invalidation
 		// reader may finish with its old value, but cannot repopulate the cache.
 		g.epochMu.Lock()
-		if epoch == g.epoch {
-			g.mainCache.add(key, view, g.opts.TTL)
+		valid := epoch == g.epochs[g.epochBucket(key)]
+		if valid {
+			view = g.mainCache.add(key, view, g.opts.TTL)
+			if g.opts.HotCacheBytes > 0 {
+				g.hotCache.remove(key)
+			}
 		}
 		g.epochMu.Unlock()
+		if !valid {
+			g.observe("discard_source", "epoch_changed", 0)
+		}
 		return view, nil
 	})
 	return await(ctx, result)
@@ -284,17 +346,44 @@ func (g *Group) Invalidate(key string) error {
 		return err
 	}
 	g.epochMu.Lock()
-	g.epoch++
+	g.epochs[g.epochBucket(key)]++
 	g.mainCache.remove(key)
+	if g.opts.HotCacheBytes > 0 {
+		g.hotCache.remove(key)
+	}
 	g.epochMu.Unlock()
 	g.observe("invalidate", "ok", 0)
 	return nil
 }
 
-func (g *Group) currentEpoch() uint64 {
+func (g *Group) populateHot(key string, value ByteView, epoch uint64) {
+	if g.opts.HotCacheBytes == 0 || value.RemainingTTL() <= 0 || int64(len(key)+value.Len()) > g.opts.HotCacheBytes {
+		return
+	}
+	g.epochMu.Lock()
+	valid := epoch == g.epochs[g.epochBucket(key)]
+	if valid {
+		g.hotCache.add(key, value, g.opts.HotTTL)
+	}
+	g.epochMu.Unlock()
+	if !valid {
+		g.observe("discard_hot", "epoch_changed", 0)
+	}
+}
+
+func (g *Group) currentEpoch(key string) uint64 {
 	g.epochMu.Lock()
 	defer g.epochMu.Unlock()
-	return g.epoch
+	return g.epochs[g.epochBucket(key)]
+}
+
+func (g *Group) epochBucket(key string) uint64 {
+	// FNV-1a over a string avoids allocating a []byte on each cache miss.
+	hash := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		hash = (hash ^ uint64(key[i])) * 1099511628211
+	}
+	return hash & uint64(g.opts.EpochBuckets-1)
 }
 
 func flightKey(epoch uint64, key string) string {

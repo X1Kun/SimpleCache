@@ -111,3 +111,18 @@ func TestRejectMethodBeforeCallingSource(t *testing.T) {
 		t.Fatalf("method validation: status=%d calls=%d", w.Code, calls)
 	}
 }
+
+func TestHotCacheConfigurationSharesCapacity(t *testing.T) {
+	t.Setenv("CACHE_BYTES", "1048576")
+	for _, value := range []string{"-1", "1048576", "not-a-number"} {
+		t.Setenv("HOT_CACHE_BYTES", value)
+		if _, err := FromEnv(8001, true); err == nil {
+			t.Fatal("invalid hot budget accepted")
+		}
+	}
+	t.Setenv("HOT_CACHE_BYTES", "131072")
+	c, err := FromEnv(8001, true)
+	if err != nil || c.HotCacheBytes != 131072 {
+		t.Fatal(c.HotCacheBytes, err)
+	}
+}

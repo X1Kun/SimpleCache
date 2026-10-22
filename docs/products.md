@@ -123,9 +123,10 @@ unknown; verify the source before retrying the business operation.
 
 An invalidation epoch protects against old local loads refilling the cache.
 Post-invalidation callers use different routing/source flight identities.
-Already-running callers may return old results. Epochs are group-wide and do
-not grow a map of historical keys: an invalidation can also cause unrelated
-active fills to be skipped/repeated, but does not evict unrelated cached entries.
+Already-running callers may return old results. There are 256 fixed epoch stripes, with no map of historical keys: hash
+collisions can conservatively skip/repeat another active fill in the same stripe,
+but do not evict unrelated cached entries. Both source fills and optional hot
+replicas check the epoch before insertion.
 
 Broadcast is best effort: discovery can omit an unready/disconnected member,
 nodes can fail, and the writer can crash between commit and notification.
@@ -175,6 +176,16 @@ The Operator injects Secret references; it does not read credentials or create
 the database/schema. Changing the reference changes the Pod template. Updating
 the Secret contents alone requires a controlled Pod restart; hot credential
 rotation is not implemented. Removing sourceSecret restores demo mode.
+
+Optional `HOT_CACHE_BYTES` (Operator: `spec.hotCacheBytes`) reserves part of the
+existing logical cache budget for peer replicas. It defaults to zero; it must
+be smaller than CACHE_BYTES. For example, with cacheBytes=67108864 and
+hotCacheBytes=8388608, source fills have 56MiB and peer replicas 8MiB, not 72MiB
+total. Replicas expire within one second and never extend the peer's remaining
+TTL. Writes invalidate both areas. Short TTL limits retention, but concurrent
+notification gaps can still admit an old response; enabling this option does not
+provide read-after-write consistency. Compare a representative hot workload
+before reserving owner capacity. See [workload comparisons](postgres-comparison.md).
 
 ## Validation
 

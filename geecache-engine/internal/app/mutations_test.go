@@ -64,6 +64,11 @@ type productNode struct {
 
 func productCluster(t *testing.T, store MutableSource) []productNode {
 	t.Helper()
+	return productClusterWithHotBudget(t, store, 0)
+}
+
+func productClusterWithHotBudget(t *testing.T, store MutableSource, hotBytes int64) []productNode {
+	t.Helper()
 	const token = "test-token"
 	var nodes []productNode
 	var members []peer.Member
@@ -71,7 +76,7 @@ func productCluster(t *testing.T, store MutableSource) []productNode {
 		id := fmt.Sprintf("node-%d", i)
 		router := peer.NewRouterWithToken(id, time.Second, token)
 		t.Cleanup(router.Close)
-		group := cache.NewGroup("products", 1<<20, store, cache.Options{Peers: router})
+		group := cache.NewGroup("products", 1<<20, store, cache.Options{Peers: router, HotCacheBytes: hotBytes})
 		server := httptest.NewServer(peer.NewHandlerWithToken(token, group))
 		t.Cleanup(server.Close)
 		members = append(members, peer.Member{ID: id, Address: strings.TrimPrefix(server.URL, "http://")})
@@ -97,8 +102,17 @@ func productRequest(handler http.Handler, method, path, body, token string) *htt
 }
 
 func TestProductWriteBroadcastReadDeleteLifecycle(t *testing.T) {
+	for _, hotBytes := range []int64{0, 128 << 10} {
+		t.Run(fmt.Sprintf("hot-bytes-%d", hotBytes), func(t *testing.T) {
+			productWriteBroadcastReadDeleteLifecycle(t, hotBytes)
+		})
+	}
+}
+
+func productWriteBroadcastReadDeleteLifecycle(t *testing.T, hotBytes int64) {
+	t.Helper()
 	store := &memoryProducts{values: map[string][]byte{"product:42": []byte(`{"price":100}`)}}
-	nodes := productCluster(t, store)
+	nodes := productClusterWithHotBudget(t, store, hotBytes)
 	for _, node := range nodes {
 		w := productRequest(node.api, "GET", "/api?key=product:42", "", "")
 		if w.Code != 200 || w.Body.String() != `{"price":100}` {
@@ -108,7 +122,16 @@ func TestProductWriteBroadcastReadDeleteLifecycle(t *testing.T) {
 	if store.reads != 1 {
 		t.Fatalf("stable routing should share one source fill, got %d", store.reads)
 	}
-	// Simulate real fallback/historical copies on every node.
+	if hotBytes > 0 {
+		totalHot := 0
+		for _, node := range nodes {
+			totalHot += node.group.Stats().HotEntries
+		}
+		if totalHot != 2 {
+			t.Fatalf("expected two actual HTTP peer replicas before mutation, got %d", totalHot)
+		}
+	}
+	// Populate fallback/historical copies when a node has no hot copy.
 	for _, node := range nodes {
 		if _, err := node.group.GetLocal(context.Background(), "product:42"); err != nil {
 			t.Fatal(err)

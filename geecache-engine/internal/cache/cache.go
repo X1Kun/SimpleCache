@@ -24,22 +24,44 @@ func (c *cache) remove(key string) {
 
 // add inserts an entry while holding the cache lock.
 // Initialize the LRU lazily, then insert the value.
-func (c *cache) add(key string, value ByteView, ttl time.Duration) {
+func (c *cache) add(key string, value ByteView, ttl time.Duration) ByteView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if int64(len(key)+value.Len()) > c.cacheBytes {
+		if c.lru != nil {
+			c.lru.Remove(key)
+		}
+		value.expiresAt = time.Time{}
+		return value
+	}
+	deadline := time.Now().Add(ttl)
+	if !value.expiresAt.IsZero() && value.expiresAt.Before(deadline) {
+		deadline = value.expiresAt
+	}
+	if !deadline.After(time.Now()) {
+		if c.lru != nil {
+			c.lru.Remove(key)
+		}
+		return value
+	}
+	value.expiresAt = deadline
 	// lazy initialization
 	if c.lru == nil {
 		c.lru = lru.New(c.cacheBytes, func(string, lru.Value) { c.evictions++ })
 	}
-	c.lru.Add(key, value, ttl)
+	c.lru.AddUntil(key, value, deadline)
+	return value
 }
 
 // Stats describes local logical storage; expired entries are removed lazily.
 type Stats struct {
-	Bytes    int64  `json:"logical_bytes"`
-	Capacity int64  `json:"capacity_bytes"`
-	Entries  int    `json:"entries"`
-	Removals uint64 `json:"removals"`
+	Bytes       int64  `json:"logical_bytes"`
+	Capacity    int64  `json:"capacity_bytes"`
+	Entries     int    `json:"entries"`
+	Removals    uint64 `json:"removals"`
+	HotBytes    int64  `json:"hot_bytes"`
+	HotCapacity int64  `json:"hot_capacity_bytes"`
+	HotEntries  int    `json:"hot_entries"`
 }
 
 func (c *cache) stats() Stats {

@@ -17,6 +17,7 @@ type Config struct {
 	Namespace, PeerService                   string
 	API                                      bool
 	CacheBytes                               int64
+	HotCacheBytes                            int64
 	TTL                                      time.Duration
 	SourceConcurrency                        int
 	Members                                  []peer.Member
@@ -75,6 +76,13 @@ func FromEnv(port int, api bool) (Config, error) {
 			return c, fmt.Errorf("invalid TTL_SECONDS")
 		}
 		c.TTL = time.Duration(parsed) * time.Second
+	}
+	if v := os.Getenv("HOT_CACHE_BYTES"); v != "" {
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || parsed < 0 || parsed >= c.CacheBytes {
+			return c, fmt.Errorf("invalid HOT_CACHE_BYTES")
+		}
+		c.HotCacheBytes = parsed
 	}
 	if v := os.Getenv("SOURCE_MAX_CONCURRENCY"); v != "" {
 		parsed, err := strconv.Atoi(v)

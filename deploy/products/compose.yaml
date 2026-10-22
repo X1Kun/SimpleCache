@@ -35,6 +35,7 @@ services:
       # The initialization server only listens on a Unix socket. TCP becomes
       # available after all entrypoint initialization scripts have finished.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U simplecache -d simplecache"]
+      start_period: 60s
       interval: 2s
       timeout: 2s
       retries: 30

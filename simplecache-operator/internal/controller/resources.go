@@ -59,6 +59,7 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		{Name: "DISCOVERY_MODE", Value: "kubernetes"},
 		{Name: "PEER_SERVICE", Value: cr.Name + "-svc"},
 		{Name: "CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.CacheBytes, 10)},
+		{Name: "HOT_CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.HotCacheBytes, 10)},
 		{Name: "TTL_SECONDS", Value: strconv.Itoa(int(cr.Spec.TTLSeconds))},
 	}
 	if cr.Spec.SourceSecret != "" {

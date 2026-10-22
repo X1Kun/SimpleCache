@@ -80,6 +80,26 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
 	})
 
+	It("reserves hot cache within the total budget and rejects an oversized reservation", func() {
+		cr.Spec.HotCacheBytes = 1 << 20
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		reconcileNow()
+		var sts appsv1.StatefulSet
+		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
+		env := map[string]string{}
+		for _, value := range sts.Spec.Template.Spec.Containers[0].Env {
+			env[value.Name] = value.Value
+		}
+		Expect(env["CACHE_BYTES"]).To(Equal("67108864"))
+		Expect(env["HOT_CACHE_BYTES"]).To(Equal("1048576"))
+		getCR()
+		cr.Spec.HotCacheBytes = cr.Spec.CacheBytes
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		reconcileNow()
+		getCR()
+		Expect(meta.FindStatusCondition(cr.Status.Conditions, "Ready").Reason).To(Equal("InvalidSpec"))
+	})
+
 	It("wires PostgreSQL Secret references and removes them when returning to demo mode", func() {
 		cr.Spec.SourceSecret = "product-source"
 		Expect(k8sClient.Update(ctx, cr)).To(Succeed())

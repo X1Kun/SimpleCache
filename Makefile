@@ -1,6 +1,6 @@
 .PHONY: test race build vet check test-operator fmt-check test-ci test-operator-ci compose-config generated-check k8s-render
 .PHONY: kind-up kind-smoke kind-delete
-.PHONY: validate perf
+.PHONY: validate perf postgres-compare
 
 # Prevent Go from invoking Git for automatic version stamping.
 export GOFLAGS := $(GOFLAGS) -buildvcs=false
@@ -55,6 +55,10 @@ validate:
 # Manual separate-process investigation; default 10s x 3 repeats per scenario.
 perf:
 	bash scripts/validation/run.sh perf
+
+# Real PostgreSQL, read-routing variants, isolated cache subprocesses and reports.
+postgres-compare:
+	bash scripts/products/compare.sh
 
 kind-delete:
 	bash scripts/kind/delete.sh
