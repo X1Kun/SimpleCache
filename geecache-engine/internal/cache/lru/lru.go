@@ -89,6 +89,11 @@ func (c *Cache) Add(key string, value Value, ttl time.Duration) {
 	if ttl > 0 {
 		expireAt = time.Now().Add(ttl)
 	}
+	c.AddUntil(key, value, expireAt)
+}
+
+// AddUntil keeps a remote owner's exact deadline instead of restarting TTL.
+func (c *Cache) AddUntil(key string, value Value, expireAt time.Time) {
 
 	if e, ok := c.cache[key]; ok {
 		c.ll.MoveToFront(e)

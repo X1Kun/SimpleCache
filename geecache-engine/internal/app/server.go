@@ -73,7 +73,7 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(value.ByteSlice())
+		_, _ = value.WriteTo(w)
 	})
 	if opts.Router != nil && opts.Token != "" {
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +148,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	}
 	group := cache.NewGroup(groupName, c.CacheBytes, source, cache.Options{
 		TTL: c.TTL, KnownKeys: knownKeys, Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiter(c.SourceConcurrency), Observer: metrics,
+		HotCacheBytes: c.HotCacheBytes,
 	})
 	metrics.ObserveCache(group)
 	var watcher *discovery.Watcher

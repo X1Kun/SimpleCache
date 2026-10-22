@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
@@ -93,5 +94,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set(TTLHeader, strconv.FormatInt(int64(value.RemainingTTL()), 10))
 	_, _ = w.Write(body)
 }

@@ -41,6 +41,12 @@ type SimpleCacheSpec struct {
 	// +kubebuilder:validation:Maximum=134217728
 	// +optional
 	CacheBytes int64 `json:"cacheBytes,omitempty"`
+	// HotCacheBytes reserves part of CacheBytes for remote read replicas.
+	// Zero disables hot caching; replicas have at most a one-second local TTL.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=134217727
+	// +optional
+	HotCacheBytes int64 `json:"hotCacheBytes,omitempty"`
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600

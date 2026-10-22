@@ -113,13 +113,30 @@ Results identify failed/timed-out targets. HTTP 200 means every target in this
 snapshot acknowledged; 202 means incomplete best-effort invalidation, with no
 background delivery promise. Neither response establishes global consensus.
 
-Each group has a mutex-protected epoch. Invalidation increments it and removes
-the requested key under the same lock used to validate source-result insertion.
-Both SingleFlight keys include the epoch, so calls beginning after local
-invalidation do not join pre-invalidation flights. Earlier callers may still
-receive their earlier results. The epoch is group-wide to avoid an unbounded
-per-key tombstone map: unrelated active loads may skip insertion or be repeated
-after an invalidation, while unrelated cached values remain intact.
+Each group has 256 fixed, mutex-protected epoch stripes. Invalidation increments
+the requested key's stripe and removes its main/hot entries under the same lock
+used to validate source and peer-result insertion. Both SingleFlight keys include
+the stripe epoch, so calls beginning after local invalidation do not join older
+flights. Earlier callers may still receive earlier results. Fixed stripes use
+2KiB of generation counters per group, without a historical-key map. Collisions
+conservatively fence unrelated active loads in the same stripe; unrelated cached
+values remain intact. A single-stripe diagnostic option reproduces the former
+behavior for comparisons, not as an application configuration.
+
+Optional HOT_CACHE_BYTES reserves part of CACHE_BYTES for short-lived peer
+replicas; zero disables it. The remainder stays available to source fills.
+Replicas use LRU admission, must fit their reserved budget, and expire at the
+minimum of their inherited owner lifetime and one second. Peer responses carry
+remaining TTL; the client conservatively consumes the entire request duration.
+Missing TTL metadata permits reads but prevents replica admission. This avoids
+extending owner expiry or requiring synchronized clocks. Both caches participate
+in local invalidation and generation checks. A successful source fill removes
+any older hot copy. Oversized values are returned without flushing other entries.
+The extra replicas trade owner capacity and bounded temporary duplication for
+fewer peer RPCs; they do not add a global read barrier.
+
+ByteView.WriteTo writes its immutable bytes directly to the HTTP writer under
+the io.Writer contract. ByteSlice retains its defensive-copy behavior.
 
 Notifications are not durable. Offline/undiscovered nodes, a crash between DB
 commit and broadcast, and overlapping reads/writes can expose stale data.
@@ -131,7 +148,7 @@ or linearizability guarantee is made. See [the walkthrough](products.md).
 
 ## Boundaries and evidence
 
-The demo source is read-only and identical across nodes, with 100ms simulated latency. PostgreSQL mode supplies persistent mutable products, independently of cache memory. There is no cache replication, active migration, durable invalidation, or strong consistency. SingleFlight and source limits are process-local. Membership converges eventually.
+The demo source is read-only and identical across nodes, with 100ms simulated latency. PostgreSQL mode supplies persistent mutable products, independently of cache memory. There is no durable replication, active migration, durable invalidation, or strong consistency; optional hot replicas are disposable read accelerators. SingleFlight and source limits are process-local. Membership converges eventually.
 
 Unit/race tests and fake discovery validate local contracts. Envtest additionally checks real API defaulting, allocated-field preservation, Status, conflicts, scaling without template changes, and Manager child-watch repair. It does not prove deployed permissions or Pod networking. The original dedicated Kind smoke passed locally. Expanded Kind tests require error-free reads during scaling/Pod replacement and recovery from infeasible resource requests; each run reports actual outcomes. Local diagnostics measure logical capacity, hash movement, source limits and latency, with test-process profiles rather than a publicly exposed admin endpoint. Grafana provisioning and deployed-process profiling remain separate follow-up work.
 

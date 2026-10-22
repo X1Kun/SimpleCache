@@ -51,6 +51,14 @@ spec:
                 maximum: 134217728
                 minimum: 1048576
                 type: integer
+              hotCacheBytes:
+                description: |-
+                  HotCacheBytes reserves part of CacheBytes for remote read replicas.
+                  Zero disables hot caching; replicas have at most a one-second local TTL.
+                format: int64
+                maximum: 134217727
+                minimum: 0
+                type: integer
               image:
                 minLength: 1
                 type: string
