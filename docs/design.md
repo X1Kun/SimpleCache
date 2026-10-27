@@ -1,8 +1,8 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-10-27. The working tree adds PostgreSQL source
-versions and conditional writes to the main c350421 baseline. Historical
-measurements below refer to their original binaries. Gateway routing and
+Documentation updated 2026-10-27. Main 75a6a39 includes PostgreSQL source
+versions and conditional writes; this working tree adds write-path timing,
+bounded admission and active expiration. Historical measurements below refer to their original binaries. Gateway routing and
 version-bearing/durable invalidation remain future work.
 
 This is the project's single detailed guide. [README](../README.md) is the
@@ -28,8 +28,8 @@ available for isolated cache and platform diagnostics.
 | Reads | Local cache, optional hot, then preferred Peer/source | Gateway directly selects the cache shard; local miss loads PostgreSQL |
 | Writes | Authenticated create/update/delete with atomic source-version checks | Business services add their own predicates/transactions as needed |
 | Invalidation | Key-only best-effort HTTP fan-out, 256 local epoch stripes | Version-bearing events plus existing local fill fencing |
-| Expiration | Lookup-time lazy expiration | Add bounded background cleanup; retain lookup checks |
-| Protection | Source concurrency, deadlines and same-key coalescing | Also bound pending requests and shared work |
+| Expiration | Lookup-time checks plus bounded lifecycle-owned cleanup | Evaluate reclamation behavior under larger working sets |
+| Protection | Bounded API/Peer miss waiters, shared routes, source queue and writes | Validate budgets against real container memory and workloads |
 | Replication | Disposable hot copies, no replicated shard groups | Start without cache replication; add only for measured recovery needs |
 | Deployment | StatefulSet; cache Pods watch EndpointSlices | Multiple Gateways own normal read routing; retain invalidation discovery |
 
@@ -63,14 +63,37 @@ not call Forget or cancel work still useful to other waiters.
 Budgets are not a simple serial sum: independent source work can finish after
 a route stops waiting. A late Peer failure can leave too little route time for
 fallback to return to that caller. Source implementations must honor context.
-The limiter bounds executing Getters, not all waiting requests or distinct-key
-flights. PostgreSQL pool MaxConns follows SOURCE_MAX_CONCURRENCY, with MinConns=0;
+Read admission has separate API and Peer miss-waiter lanes (128 each by
+default), plus a separate shared-route task bound of 128. Hits bypass these
+budgets; probes and incoming Peer invalidations do not wait behind miss callers.
+Route slots are acquired inside SingleFlight and held until shared work ends,
+even if its caller cancels. Local source fallback does not acquire a second Peer
+waiter slot. Same-key callers share work, but each waiting caller still consumes
+one waiter slot.
+
+The source limiter allows 32 executing Getters plus at most 128 queued tasks;
+queued time remains part of the 800ms source budget. Queue capacity zero rejects
+immediately when execution slots are full. Writes/cache-only invalidation API
+requests have a separate default concurrency bound of 16, acquired after
+authentication/key checks and before body buffering. Rejection returns 503 with
+Retry-After: 1 instead of waiting in another unbounded queue. There is no hidden
+automatic retry.
+
+These are application-work count limits, not a bound on all net/http connections,
+slow clients, response memory, process RSS or cluster-wide DB work. Value sizes,
+Go runtime headroom and the sum of per-Pod budgets still need container testing.
+A process-local limit must not be described as a global database quota.
+PostgreSQL pool MaxConns follows SOURCE_MAX_CONCURRENCY, with MinConns=0;
 source writes use the pool and their own timeout, not the read-Getter slots.
 
 Only 404 with `X-SimpleCache-Error: KEY_NOT_FOUND` is a terminal Peer business
 miss. Unknown groups, untyped 404s, transport/protocol failures and oversized
-responses may fall back. Public errors include invalid key 400, missing key 404,
-source failure 503 and timeout 504. Peer body length is checked before decoding
+responses may fall back. A typed Peer 503 with X-SimpleCache-Error: OVERLOADED
+is propagated without
+local source fallback, avoiding extra source pressure when the owner rejects
+work; other network/protocol failures retain existing fallback. Public errors
+include invalid key 400, missing key 404, overload/source failure 503 and
+timeout 504. Peer body length is checked before decoding
 and the value is checked afterward. Paths preserve escaped Unicode, slash,
 space and plus characters; the HTTP transport reuses connections and rejects
 redirects. Protobuf is used over HTTP, not gRPC.
@@ -82,8 +105,18 @@ Successful lookups move recency and therefore cannot simply use an RLock.
 Logical accounting is key bytes plus value bytes, excluding Go objects, maps,
 list/expiry/version metadata, requests and runtime overhead. CACHE_BYTES is not an RSS
 limit. Oversized entries are returned without flushing unrelated cached entries.
-Expiration is checked on lookup; expired unvisited entries can remain accounted
-until lookup or eviction. No active expiration worker currently exists.
+Expiration is checked on lookup. One lifecycle-owned maintenance worker also
+runs every second, inspecting at most 128 entries and a best-effort 2ms work
+budget per main/hot area per cycle. A persistent list cursor avoids copying all
+keys; deletion/eviction advances it so a recreated key cannot be removed through
+an old element. Maintenance does not refresh recency or TTL, mutate source
+versions, or increment invalidation epochs.
+
+A busy cache mutex is skipped with TryLock, not waited on; the timer is stopped
+on lifecycle cancellation. This is opportunistic reclamation, not a real-time
+expiry deadline: unvisited expired entries can remain counted, goroutine
+scheduling can exceed the work budget, and clearing references does not force
+immediate GC/RSS return. No database scan or topology-driven deletion is added.
 
 HOT_CACHE_BYTES defaults to zero. When enabled it reserves part of CACHE_BYTES:
 64MiB total with 8MiB hot leaves 56MiB main. It admits fitting Peer results to an
@@ -149,6 +182,9 @@ identity, API defaults and unrelated Pod fields are preserved.
 | cacheBytes | Per-Pod logical total; default 64MiB, range 1-128MiB |
 | hotCacheBytes | Reserved hot share; default 0, nonnegative and below cacheBytes |
 | ttlSeconds | Main TTL; default 60, range 1-3600 |
+| maxMissWaiters | Default 128, range 1-4096, applied separately to API/Peer waiting lanes and shared route tasks |
+| sourceMaxPending | Default 128, range 0-4096; explicit zero disables the source queue |
+| maxConcurrentWrites | Default 16, range 1-256; write/invalidation API concurrency |
 | resources | Requests/limits; default CPU request 100m, memory request 128Mi and limit 256Mi |
 | sourceSecret | Optional same-namespace DATABASE_URL and CACHE_ADMIN_TOKEN Secret |
 
@@ -299,13 +335,15 @@ and in-flight time, not just configured TTL. No numerical freshness SLO is set.
 PostgreSQL now generates a per-key increasing version with each mutation.
 The source-version/ETag condition is implemented; updated_at remains diagnostic
 time rather than the concurrency token. Cache epoch, routing revision and source
-version have different meanings. External writers must follow the same version/event contract.
+version have different meanings. External writers must follow the same
+version/event contract.
 Logical deletion and recreation retain monotonic generations through tombstones;
 future compaction needs an explicit version-preserving policy.
 
 Replacement/deletion check the expected version in the same SQL operation
 as the change. A mismatch is a conflict; creation has an explicit absent-key
-precondition. Return the committed version and separate delivery outcome; preserve unknown-commit handling. Business stock
+precondition. Return the committed version and separate delivery outcome;
+preserve unknown-commit handling. Business stock
 or task operations belong to their service's atomic predicates/transactions and
 idempotency rules, rather than trusting cached state as authorization to mutate.
 
@@ -325,7 +363,9 @@ catch-up or cache clearing. In-memory retry alone does not provide that guarante
 
 ### Maintenance, admission and optional replicas
 
-Add one lifecycle-owned active TTL cleaner alongside lookup-time expiration.
+The lifecycle-owned active TTL cleaner and bounded admission described above
+are now implemented alongside lookup-time expiration. Further maintenance
+changes must preserve the following constraints:
 Bound checked entries, enumeration and lock time per cycle; copying all keys
 under a lock is still a full scan. Remove cache references and logical occupancy,
 not database records. Garbage collection and RSS reclamation remain Go concerns.
@@ -336,9 +376,9 @@ before deletion. Preserve intentional hot/fallback/future replica copies as thei
 policy requires. A local scan cannot discover unseen DB updates; do not issue a
 background database query for every cached key.
 
-Bound pending requests and outstanding shared loads in addition to executing
-Getters. Keep hit/probe paths usable under miss overload and expose explicit
-rejection/recovery. Account for aggregate source pressure across Pods; scaling
+Pending miss callers, shared route work, source queue and writes now have
+separate bounds. Keep the hit/probe bypass and explicit rejection/recovery
+contract when changing admission. Account for aggregate source pressure across Pods; scaling
 Gateways or caches alone does not protect PostgreSQL.
 
 Introduce cache replicas only if node-loss tests show excessive source traffic,
@@ -375,7 +415,10 @@ demo uses SELF_ADDR and comma-separated PEERS HTTP URLs.
 | CACHE_BYTES | 64MiB logical key/value total, range 1-128MiB |
 | HOT_CACHE_BYTES | 0, reserved from total, must be below CACHE_BYTES |
 | TTL_SECONDS | 60, range 1-3600 |
-| SOURCE_MAX_CONCURRENCY | 32 per process |
+| SOURCE_MAX_CONCURRENCY | 32 executing read Getters per process |
+| SOURCE_MAX_PENDING | 128 source tasks waiting for execution slots; range 0-4096 |
+| MAX_MISS_WAITERS | 128 per API/Peer miss lane and shared route-task budget; range 1-4096 |
+| WRITE_MAX_CONCURRENCY | 16 admitted writes/cache-only invalidations; range 1-256 |
 | API_ADDR | 0.0.0.0:9999 |
 | SOURCE_MODE | demo; postgres requires DATABASE_URL and CACHE_ADMIN_TOKEN |
 | DATABASE_URL | Unset; never logged |
@@ -623,7 +666,8 @@ report functional-only; default has 45 trials, quick 15.
 Run [20261022T074739Z-postgres-compare-takb8Znb](../bin/reports/20261022T074739Z-postgres-compare-takb8Znb/report.md)
 passed 45 trials / 63 stages / 101,412 measured reads, with zero errors, incorrect
 values or skipped reads. Schema deletion and wrapper exit/cleanup succeeded.
-These are three-pair medians at equal total logical cache budgets:
+These are three-pair medians at equal total logical cache budgets, from the
+historical build before the current admission/maintenance changes:
 
 | Comparison | Metric | Left / right |
 | --- | --- | --- |
@@ -662,6 +706,8 @@ Other evidence remains separate:
 
 - [Local adversarial run](../bin/reports/20261009T142745Z-local-BAEZeH/report.md):
   512 same-key waiters / one Getter; 256 distinct keys / peak eight source slots;
+  current reruns explicitly set waiter/queue capacity high enough for these
+  coalescing scenarios, while separate admission tests assert overload rejection;
   100,000 keys on 3->4 expansion moved 25.364%, all toward the new member.
 - [Kind run](../bin/reports/20261009T054920Z-kind-4Pn0cc/report.md): 1,268 reads,
   zero HTTP/value errors, P99 139.870ms during retained-entry scaling/replacement.
@@ -687,13 +733,39 @@ mixed independent update and returned unknown commit status; its failed report
 is retained, and the independent rerun passed. These checks establish functional
 behavior, not a new latency/throughput baseline.
 
+The operational-protection working tree passed engine race/vet, Operator
+lint/envtest, generated/render/config checks, the four real-PG integration tests,
+and a separate 15-trial / 30,732-read quick comparison. The new contract tests
+cover separate admission lanes, cancellation with surviving shared work, queue
+cancellation/recovery, typed Peer overload without fallback, pre-body write
+rejection, separate timing phases, and bounded expiration including replacement
+safety and lifecycle stop. The real fixture snapshots also show nonzero active
+expiration removals and independent source-write/fan-out durations.
+See [verification](../bin/reports/20261027T041517Z-runtime-protection-xkensxq4/verification.json)
+and the [quick report](../bin/reports/20261027T041905Z-postgres-compare-loPwVdXV/report.md).
+This validates bounded admitted work and functionality, not a process RSS bound,
+a full container memory stress test, or a new throughput/latency improvement.
+
 ### Diagnosis, metrics and CI
 
 Metrics distinguish API/Peer lookups, actual Peer and Getter calls, fallback,
 slot wait/inflight, source writes, invalidation/fan-out, discarded source/hot
 fills, hot hits, membership changes/errors, and logical storage. Labels exclude
-keys, arbitrary URLs and error text. Source-write and fan-out phases currently
-have counters, not dedicated duration histograms.
+keys, arbitrary URLs and error text. Source-write and fan-out phases now have separate result-labeled histograms:
+simplecache_source_write_duration_seconds and
+simplecache_invalidation_broadcast_duration_seconds. They measure source work
+(including pool wait) and the whole fan-out respectively, not JSON body upload.
+Conflicts have precondition_failed results and do not increment
+simplecache_source_unknown_commits_total; transport/timeout source failures retain
+the unknown-commit contract. simplecache_write_requests_inflight spans admitted
+body/source/fan-out work.
+
+Admission gauges expose API/Peer miss waiters, shared route tasks and pending
+source tasks. simplecache_admission_rejections_total has bounded kind labels
+(api_waiter, peer_waiter, route_task, source_queue, write), never keys or URLs.
+Cleanup counters expose checked/removed entries and busy-lock skips, with a
+per-area duration histogram. Existing total removal accounting includes active
+expiration as well as eviction, lazy expiration and explicit invalidation.
 
 make perf runs fresh diagnostic-server/bench processes with 8 workers, 1ms think
 time, GOMAXPROCS=2, 10s x three unprofiled repetitions per scenario plus separate
@@ -729,23 +801,49 @@ publishing. CI does not run Kind or the heavy manual investigations.
 
 ## Delivery plan
 
-The 2026-10-26 direction replaces earlier follow-up lists. On 2026-10-27, source
-versions, ETags and conditional mutations are implemented in this working tree;
-version-bearing invalidation, Gateway routing and the remaining items are pending.
+Priority clarified on 2026-10-27: first deliver a runnable, explainable target
+system, then establish performance results on that real chain. Main 75a6a39 has
+source versions, ETags and conditional mutations. The current commit completes
+write/fan-out timing, bounded admission and active TTL maintenance, including
+Operator settings and behavior tests; it is a runtime-protection change, not
+completion of Gateway routing or a system-level performance claim.
 
-| Order | Planned work | Acceptance |
+The next work follows four decisions:
+
+1. Retain existing evidence for local coalescing, avoided duplicate source work,
+   conditional writes and reads during scaling. Do not expand the old Peer-route
+   performance suite before target functionality is ready.
+2. The client -> Gateway -> cache Pod -> PostgreSQL chain is not yet deployed.
+   Existing measurements cannot establish its end-to-end benefit or component
+   latency; new counters and timings are diagnostic infrastructure.
+3. Prioritize existing Envoy Gateway integration: canonical key routing,
+   multi-Gateway affinity/configuration behavior and Operator deployment support;
+   also implement source-version-bearing invalidation with bounded metadata and
+   explicit out-of-order/late-fill handling.
+4. Keep development validation to necessary unit/race tests, lint/envtest and
+   functional smokes. After the combined chain works, run dedicated end-to-end,
+   phase-timing, invalidation-order, sustained read/write and recovery experiments.
+
+| Stage | Work | Acceptance |
 | --- | --- | --- |
-| 1 | Source versions and conditional updates/deletes implemented; version-bearing invalidation next | Concurrent replacements/creates and delete/recreate tested; future events need monotonic known-version handling |
-| 2 | Write/fan-out timing, bounded admission and active TTL cleanup | Distinguish DB/notification delay; bounded waiting and scan work; usable hit/probe paths; explicit rejection and recovery |
-| 3 | Direct Gateway key routing and Operator integration | Multi-Gateway key affinity, stable identity, bounded view transition and no routine Peer read hop |
-| 4 | Combined PG/Gateway deployment and sustained tests | Writes, multiple TTL cycles, expansion and owner loss; record old-version reads, source amplification, errors/rejection, latency and recovery |
-| Conditional | Cache replicas or durable event relay | Add against measured warm-recovery needs or an explicit notification-recovery guarantee; validate reconnect/failure paths at equal budgets |
+| Ready to commit | Runtime timing, bounded admission and active TTL cleanup | Separate DB/fan-out observations, bounded admitted work, usable hit/probe paths, cancellation/recovery and safe incremental cleanup; existing functional regressions pass |
+| Next: functional architecture | Envoy Gateway key routing, multiple Gateway instances and Operator integration | Same canonical key selects the expected shard under stable views; stable backend identity, bounded configuration transitions and no routine cache-to-cache read hop |
+| Next: invalidation semantics | Carry committed source versions to holders and retain local epoch fencing | Old/duplicate events do not move known versions backwards; late fills, deletion/recreation and reconnect behavior have defined bounds; no unbounded per-key metadata |
+| Combined functional smoke | PostgreSQL + Gateway + cache Pods | Authenticated conditional writes, reads through each Gateway, invalidation and owner replacement work together without implying instantaneous global freshness |
+| After functionality | Real-chain experiments | Measure client end-to-end and component latency, notification ordering/old-version windows, multiple TTL cycles, sustained read/write and fault/recovery under declared equal budgets |
+| Conditional | Cache replicas or durable event relay | Add only against measured cold-recovery needs or an explicit durable-notification requirement, with independent reconnect/failure acceptance |
 
-Replica count is a future separate concept from shard count. Database HA remains
-a PostgreSQL responsibility. Strong cache consensus, Sidecar/DaemonSet deployment,
-HPA and advanced scheduling are not first-stage commitments. Keep a single
-replica authority if autoscaling is introduced. Use real failure requirements
-and measurements to select further work.
+The 15-trial quick comparison checks existing behavior and fixtures; it is not a
+performance baseline or a substitute for Gateway integration. Gateway/controller
+configuration and source-version event semantics remain the implementation
+priority after this commit. Do not interleave that work with new microbenchmarks,
+parameter sweeps or efforts to improve historical local performance numbers.
+
+Start without cache replica groups; PostgreSQL remains authoritative. Strong
+cache consensus, Sidecar/DaemonSet deployment and HPA are not first-stage
+requirements. Preserve a single replica-count authority if autoscaling is later
+introduced. Logical work/storage limits remain distinct from process RSS and
+cluster-wide database quotas.
 
 References: [Envoy Gateway](https://gateway.envoyproxy.io/docs/tasks/traffic/load-balancing/),
 [PostgreSQL concurrency](https://www.postgresql.org/docs/17/transaction-iso.html),

@@ -24,11 +24,15 @@ type MutableSource interface {
 }
 
 type APIOptions struct {
-	Store     MutableSource
-	Router    *peer.Router
-	Token     string
-	Lifecycle context.Context
+	Store               MutableSource
+	Router              *peer.Router
+	Token               string
+	Lifecycle           context.Context
+	MaxConcurrentWrites int
+	writeSlots          chan struct{}
 }
+
+const DefaultWriteConcurrency = 16
 
 type mutationResponse struct {
 	// nil means unknown after a source error, not a guaranteed rollback.
@@ -48,6 +52,27 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	if err := cache.ValidateKey(key); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	// Keep body buffering and fan-out bounded independently of read misses.
+	select {
+	case opts.writeSlots <- struct{}{}:
+		if metrics != nil {
+			metrics.WriteInflight(1)
+		}
+		defer func() {
+			<-opts.writeSlots
+			if metrics != nil {
+				metrics.WriteInflight(-1)
+			}
+		}()
+	default:
+		if metrics != nil {
+			metrics.Observe("rejected", "write", 0)
+		}
+		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, cache.ErrOverloaded.Error(), http.StatusServiceUnavailable)
+		return "overloaded"
 	}
 	var value []byte
 	if r.Method == http.MethodPut {
@@ -89,6 +114,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	var writeErr error
 	var response mutationResponse
 	if !invalidateOnly {
+		writeStart := time.Now()
 		source, stop := context.WithTimeout(work, 800*time.Millisecond)
 		var version int64
 		if r.Method == http.MethodPut {
@@ -103,7 +129,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 			response.SourceVersion = &version
 		}
 		if metrics != nil {
-			metrics.Observe("write", cache.Result(writeErr), 0)
+			metrics.Observe("write", cache.Result(writeErr), time.Since(writeStart))
 		}
 		if errors.Is(writeErr, cache.ErrPreconditionFailed) {
 			// This is a known failed condition, not an ambiguous commit. No
@@ -118,8 +144,12 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		}
 	}
 	// Even an error can mean an ambiguous commit. Attempt invalidation then too.
+	broadcastStart := time.Now()
 	report, err := opts.Router.Invalidate(work, group, key)
 	if err != nil {
+		if metrics != nil {
+			metrics.Observe("broadcast", "error", time.Since(broadcastStart))
+		}
 		http.Error(w, err.Error(), peer.Status(err))
 		return
 	}
@@ -131,7 +161,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		broadcastResult = "partial"
 	}
 	if metrics != nil {
-		metrics.Observe("broadcast", broadcastResult, 0)
+		metrics.Observe("broadcast", broadcastResult, time.Since(broadcastStart))
 	}
 	if writeErr != nil {
 		status = peer.Status(writeErr)

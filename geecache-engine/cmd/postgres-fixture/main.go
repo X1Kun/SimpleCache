@@ -117,6 +117,7 @@ func run(ctx context.Context, mode string, node int, addresses []string, api str
 		go func(server *http.Server, listener net.Listener) { errors <- server.Serve(listener) }(server, listeners[i])
 	}
 	ready.Store(true)
+	go group.RunMaintenance(work)
 	slog.Info("Fixture ready", "listeners", map[string]string{"peer": listeners[0].Addr().String(), "api": listeners[1].Addr().String()})
 	var result error
 	select {

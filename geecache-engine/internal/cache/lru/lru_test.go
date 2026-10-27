@@ -1,10 +1,59 @@
 package lru
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
 )
+
+func TestPruneExpiredResumesAndDoesNotDeleteReplacements(t *testing.T) {
+	c := New(1024, nil)
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		c.AddUntil(fmt.Sprint(i), String("old"), now.Add(-time.Second))
+	}
+	checked, removed := c.PruneExpired(now, 1, time.Second)
+	if checked != 1 || removed != 1 || c.Len() != 2 {
+		t.Fatal("unbounded or incomplete first batch", checked, removed, c.Len())
+	}
+	// The next cursor entry is explicitly evicted and recreated at a new expiry.
+	c.Remove("1")
+	c.AddUntil("1", String("new"), now.Add(time.Hour))
+	c.Add("never", String("keep"), 0)
+	for i := 0; i < 8; i++ {
+		n, _ := c.PruneExpired(now, 1, time.Second)
+		if n > 1 {
+			t.Fatal("scan exceeded its entry budget")
+		}
+	}
+	if c.Len() != 2 || c.Bytes() != int64(len("1newneverkeep")) {
+		t.Fatal("cursor removed a new value or leaked bytes", c.Len(), c.Bytes())
+	}
+	if v, ok := c.Get("1"); !ok || v.(String) != "new" {
+		t.Fatal("replacement was removed")
+	}
+	if _, ok := c.Get("2"); ok {
+		t.Fatal("cold expiry was not reclaimed")
+	}
+}
+
+func TestPruneExpiredDoesNotRefreshRecency(t *testing.T) {
+	c := New(16, nil)
+	c.Add("a", String("111"), time.Hour)
+	c.Add("b", String("222"), time.Hour)
+	c.Add("c", String("333"), time.Hour)
+	for i := 0; i < 5; i++ {
+		c.PruneExpired(time.Now(), 1, time.Second)
+	}
+	c.Add("d", String("44444"), time.Hour)
+	if _, ok := c.Get("a"); ok {
+		t.Fatal("maintenance refreshed the oldest entry")
+	}
+	if _, ok := c.Get("b"); !ok {
+		t.Fatal("wrong entry evicted after maintenance")
+	}
+}
 
 type String string
 
