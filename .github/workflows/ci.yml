@@ -121,7 +121,7 @@ jobs:
         working-directory: geecache-engine
         env:
           SIMPLECACHE_TEST_DATABASE_URL: postgres://simplecache:integration-only-password@127.0.0.1:5432/simplecache?sslmode=disable
-        run: go test -race -count=1 -timeout=2m -run '^TestPostgres(OpenChecksExecutionErrors|ProductLifecycle)$' -v ./internal/source/postgres ./internal/app
+        run: go test -race -count=1 -timeout=2m -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle)$' -v ./internal/source/postgres ./internal/app
       - name: Smoke-test paired PostgreSQL workloads
         env:
           SIMPLECACHE_COMPARE_DATABASE_URL: postgres://simplecache:integration-only-password@127.0.0.1:5432/simplecache?sslmode=disable

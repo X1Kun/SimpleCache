@@ -29,7 +29,7 @@ func Open(ctx context.Context, url string, maxConnections int32) (*Store, error)
 		return nil, errors.New("could not create PostgreSQL pool")
 	}
 	// Unlike NewWithConfig, this actually connects and checks the schema.
-	rows, err := pool.Query(ctx, "SELECT key, value FROM simplecache_products LIMIT 0")
+	rows, err := pool.Query(ctx, "SELECT key, value, version, deleted FROM simplecache_products LIMIT 0")
 	if err == nil {
 		// Execution errors can arrive after Query returns its row description.
 		rows.Close()
@@ -45,42 +45,109 @@ func Open(ctx context.Context, url string, maxConnections int32) (*Store, error)
 func (s *Store) Close() { s.pool.Close() }
 
 func (s *Store) Get(ctx context.Context, key string) ([]byte, error) {
+	value, err := s.GetVersioned(ctx, key)
+	return value.Value, err
+}
+
+func (s *Store) GetVersioned(ctx context.Context, key string) (cache.SourceValue, error) {
 	if err := cache.ValidateKey(key); err != nil {
-		return nil, err
+		return cache.SourceValue{}, err
 	}
-	var value []byte
-	err := s.pool.QueryRow(ctx, "SELECT value FROM simplecache_products WHERE key = $1", key).Scan(&value)
+	var value cache.SourceValue
+	err := s.pool.QueryRow(ctx, "SELECT value, version FROM simplecache_products WHERE key = $1 AND NOT deleted", key).Scan(&value.Value, &value.Version)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, cache.ErrNotFound
+		return cache.SourceValue{}, cache.ErrNotFound
 	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return cache.SourceValue{}, ctx.Err()
 		}
-		return nil, errors.New("PostgreSQL read failed")
+		return cache.SourceValue{}, errors.New("PostgreSQL read failed")
 	}
 	return value, nil
 }
 
+// Put is for trusted source-side writes/fixtures, not the public mutation API.
+// It still advances the source version, including after a logical deletion.
 func (s *Store) Put(ctx context.Context, key string, value []byte) error {
+	if err := validateValue(key, value); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
+		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+		version = simplecache_products.version + 1, deleted = false, updated_at = now()`, key, value)
+	return writeError(ctx, err)
+}
+
+// PutIfVersion uses zero only for create-if-absent. A tombstone is absent to
+// readers, but its generation survives so recreation cannot match an old ETag.
+func (s *Store) PutIfVersion(ctx context.Context, key string, value []byte, expected int64) (int64, error) {
+	if err := validateValue(key, value); err != nil {
+		return 0, err
+	}
+	if expected < 0 {
+		return 0, errors.New("invalid expected version")
+	}
+	var version int64
+	var err error
+	if expected == 0 {
+		err = s.pool.QueryRow(ctx, `INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+			version = simplecache_products.version + 1, deleted = false, updated_at = now()
+			WHERE simplecache_products.deleted RETURNING version`, key, value).Scan(&version)
+	} else {
+		err = s.pool.QueryRow(ctx, `UPDATE simplecache_products SET value = $2,
+			version = version + 1, updated_at = now()
+			WHERE key = $1 AND version = $3 AND NOT deleted RETURNING version`, key, value, expected).Scan(&version)
+	}
+	return mutationResult(ctx, version, err)
+}
+
+// Delete is a trusted, idempotent source-side deletion. Keep the generation
+// instead of physically removing a row, otherwise an old client could match a
+// recreated key whose version restarted at one.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	if err := cache.ValidateKey(key); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE simplecache_products SET value = ''::bytea,
+		version = version + 1, deleted = true, updated_at = now()
+		WHERE key = $1 AND NOT deleted`, key)
+	return writeError(ctx, err)
+}
+
+func (s *Store) DeleteIfVersion(ctx context.Context, key string, expected int64) (int64, error) {
+	if err := cache.ValidateKey(key); err != nil {
+		return 0, err
+	}
+	if expected <= 0 {
+		return 0, errors.New("invalid expected version")
+	}
+	var version int64
+	err := s.pool.QueryRow(ctx, `UPDATE simplecache_products SET value = ''::bytea,
+		version = version + 1, deleted = true, updated_at = now()
+		WHERE key = $1 AND version = $2 AND NOT deleted RETURNING version`, key, expected).Scan(&version)
+	return mutationResult(ctx, version, err)
+}
+
+func validateValue(key string, value []byte) error {
 	if err := cache.ValidateKey(key); err != nil {
 		return err
 	}
 	if len(value) > cache.MaxValueBytes {
 		return cache.ErrValueTooLarge
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
-		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`, key, value)
-	return writeError(ctx, err)
+	return nil
 }
 
-// Delete is idempotent, including deletion of an already absent product.
-func (s *Store) Delete(ctx context.Context, key string) error {
-	if err := cache.ValidateKey(key); err != nil {
-		return err
+func mutationResult(ctx context.Context, version int64, err error) (int64, error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, cache.ErrPreconditionFailed
 	}
-	_, err := s.pool.Exec(ctx, "DELETE FROM simplecache_products WHERE key = $1", key)
-	return writeError(ctx, err)
+	if err != nil {
+		return 0, writeError(ctx, err)
+	}
+	return version, nil
 }
 
 func writeError(ctx context.Context, err error) error {

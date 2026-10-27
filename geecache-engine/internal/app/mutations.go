@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -12,10 +13,14 @@ import (
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 )
 
+// MutableSource requires atomic source-side preconditions. Expected version zero
+// means create-if-absent for PutIfVersion; successful mutations return a positive
+// version that survives delete/recreate. Demo sources remain read-only.
 type MutableSource interface {
 	cache.Getter
-	Put(context.Context, string, []byte) error
-	Delete(context.Context, string) error
+	cache.VersionedGetter
+	PutIfVersion(context.Context, string, []byte, int64) (int64, error)
+	DeleteIfVersion(context.Context, string, int64) (int64, error)
 }
 
 type APIOptions struct {
@@ -28,6 +33,7 @@ type APIOptions struct {
 type mutationResponse struct {
 	// nil means unknown after a source error, not a guaranteed rollback.
 	SourceCommitted *bool                    `json:"source_committed"`
+	SourceVersion   *int64                   `json:"source_version,omitempty"`
 	Invalidation    *peer.InvalidationReport `json:"invalidation,omitempty"`
 	Error           string                   `json:"error,omitempty"`
 }
@@ -61,6 +67,17 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	if r.Context().Err() != nil {
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
+	var expected int64
+	if !invalidateOnly {
+		var status int
+		var err error
+		expected, status, err = mutationPrecondition(r)
+		if err != nil {
+			http.Error(w, err.Error(), status)
+			return
+		}
+	}
 	lifecycle := opts.Lifecycle
 	if lifecycle == nil {
 		lifecycle = context.Background()
@@ -73,18 +90,31 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	var response mutationResponse
 	if !invalidateOnly {
 		source, stop := context.WithTimeout(work, 800*time.Millisecond)
+		var version int64
 		if r.Method == http.MethodPut {
-			writeErr = opts.Store.Put(source, key, value)
+			version, writeErr = opts.Store.PutIfVersion(source, key, value, expected)
 		} else {
-			writeErr = opts.Store.Delete(source, key)
+			version, writeErr = opts.Store.DeleteIfVersion(source, key, expected)
 		}
 		stop()
 		if writeErr == nil {
 			committed := true
 			response.SourceCommitted = &committed
+			response.SourceVersion = &version
 		}
 		if metrics != nil {
 			metrics.Observe("write", cache.Result(writeErr), 0)
+		}
+		if errors.Is(writeErr, cache.ErrPreconditionFailed) {
+			// This is a known failed condition, not an ambiguous commit. No
+			// source mutation occurred and no cluster invalidation is needed.
+			committed := false
+			response.SourceCommitted = &committed
+			response.Error = "precondition failed; refresh the value before retrying"
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_ = json.NewEncoder(w).Encode(response)
+			return "precondition_failed"
 		}
 	}
 	// Even an error can mean an ambiguous commit. Attempt invalidation then too.
@@ -108,6 +138,9 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		response.Error = "source write failed; commit status is unknown; verify the source before retrying"
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if writeErr == nil && r.Method == http.MethodPut && response.SourceVersion != nil {
+		w.Header().Set("ETag", versionETag(*response.SourceVersion))
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(response)
 	result = cache.Result(writeErr)

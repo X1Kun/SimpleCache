@@ -14,13 +14,25 @@ import (
 const MaxValueBytes = 1 << 20
 
 var (
-	ErrNotFound      = errors.New("key not found")
-	ErrInvalidKey    = errors.New("key must contain 1 to 256 bytes")
-	ErrValueTooLarge = errors.New("value exceeds 1MiB")
+	ErrNotFound           = errors.New("key not found")
+	ErrInvalidKey         = errors.New("key must contain 1 to 256 bytes")
+	ErrValueTooLarge      = errors.New("value exceeds 1MiB")
+	ErrPreconditionFailed = errors.New("source version precondition failed")
 )
 
 type Getter interface {
 	Get(context.Context, string) ([]byte, error)
+}
+
+// VersionedGetter reads value and version from the same source snapshot.
+// It is optional for immutable/demo sources.
+type VersionedGetter interface {
+	GetVersioned(context.Context, string) (SourceValue, error)
+}
+
+type SourceValue struct {
+	Value   []byte
+	Version int64
 }
 type GetterFunc func(context.Context, string) ([]byte, error)
 
@@ -39,6 +51,7 @@ type ExpiringPeerGetter interface {
 type PeerValue struct {
 	Value     []byte
 	ExpiresAt time.Time
+	Version   int64
 }
 type PeerPicker interface {
 	PickPeer(string) (PeerGetter, bool)
@@ -228,7 +241,7 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 					if len(value.Value) > MaxValueBytes {
 						err = ErrValueTooLarge
 					} else {
-						view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt}
+						view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt, version: value.Version}
 						g.populateHot(key, view, epoch)
 						return view, nil
 					}
@@ -298,7 +311,17 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 			defer g.opts.Observer.Inflight(-1)
 		}
 		start := time.Now()
-		value, err := g.getter.Get(work, key)
+		var value []byte
+		var version int64
+		if source, ok := g.getter.(VersionedGetter); ok {
+			loaded, loadErr := source.GetVersioned(work, key)
+			value, version, err = loaded.Value, loaded.Version, loadErr
+			if err == nil && version <= 0 {
+				err = errors.New("invalid source version")
+			}
+		} else {
+			value, err = g.getter.Get(work, key)
+		}
 		if err == nil {
 			err = work.Err()
 		}
@@ -312,7 +335,7 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 		if err := work.Err(); err != nil {
 			return ByteView{}, err
 		}
-		view := ByteView{b: cloneBytes(value)}
+		view := ByteView{b: cloneBytes(value), version: version}
 		// Check and insert under the same lock as invalidation. A pre-invalidation
 		// reader may finish with its old value, but cannot repopulate the cache.
 		g.epochMu.Lock()

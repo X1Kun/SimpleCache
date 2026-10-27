@@ -19,20 +19,49 @@ import (
 type memoryProducts struct {
 	mu       sync.Mutex
 	values   map[string][]byte
+	versions map[string]int64
 	reads    int
 	writeErr error
 	onPut    func()
 }
 
-func (s *memoryProducts) Get(_ context.Context, key string) ([]byte, error) {
+func (s *memoryProducts) versionLocked(key string) int64 {
+	if v := s.versions[key]; v > 0 {
+		return v
+	}
+	if _, ok := s.values[key]; ok {
+		return 1
+	}
+	return 0
+}
+func (s *memoryProducts) Get(ctx context.Context, key string) ([]byte, error) {
+	v, err := s.GetVersioned(ctx, key)
+	return v.Value, err
+}
+func (s *memoryProducts) GetVersioned(_ context.Context, key string) (cache.SourceValue, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reads++
 	v, ok := s.values[key]
 	if !ok {
-		return nil, cache.ErrNotFound
+		return cache.SourceValue{}, cache.ErrNotFound
 	}
-	return append([]byte(nil), v...), nil
+	return cache.SourceValue{Value: append([]byte(nil), v...), Version: s.versionLocked(key)}, nil
+}
+func (s *memoryProducts) putLocked(key string, value []byte) int64 {
+	version := s.versionLocked(key) + 1
+	if s.versions == nil {
+		s.versions = map[string]int64{}
+	}
+	if s.values == nil {
+		s.values = map[string][]byte{}
+	}
+	s.versions[key] = version
+	s.values[key] = append([]byte(nil), value...)
+	if s.onPut != nil {
+		s.onPut()
+	}
+	return version
 }
 func (s *memoryProducts) Put(_ context.Context, key string, value []byte) error {
 	s.mu.Lock()
@@ -40,20 +69,37 @@ func (s *memoryProducts) Put(_ context.Context, key string, value []byte) error 
 	if s.writeErr != nil {
 		return s.writeErr
 	}
-	s.values[key] = append([]byte(nil), value...)
-	if s.onPut != nil {
-		s.onPut()
-	}
+	s.putLocked(key, value)
 	return nil
 }
-func (s *memoryProducts) Delete(_ context.Context, key string) error {
+func (s *memoryProducts) PutIfVersion(_ context.Context, key string, value []byte, expected int64) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.writeErr != nil {
-		return s.writeErr
+		return 0, s.writeErr
 	}
+	_, exists := s.values[key]
+	if (expected == 0 && exists) || (expected > 0 && (!exists || expected != s.versionLocked(key))) {
+		return 0, cache.ErrPreconditionFailed
+	}
+	return s.putLocked(key, value), nil
+}
+func (s *memoryProducts) DeleteIfVersion(_ context.Context, key string, expected int64) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.writeErr != nil {
+		return 0, s.writeErr
+	}
+	if _, ok := s.values[key]; !ok || expected != s.versionLocked(key) {
+		return 0, cache.ErrPreconditionFailed
+	}
+	version := s.versionLocked(key) + 1
+	if s.versions == nil {
+		s.versions = map[string]int64{}
+	}
+	s.versions[key] = version
 	delete(s.values, key)
-	return nil
+	return version, nil
 }
 
 type productNode struct {
@@ -91,10 +137,17 @@ func productClusterWithHotBudget(t *testing.T, store MutableSource, hotBytes int
 	return nodes
 }
 
-func productRequest(handler http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
+func productRequest(handler http.Handler, method, path, body, token string, condition ...string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if len(condition) > 0 {
+		if condition[0] == "*" {
+			req.Header.Set("If-None-Match", "*")
+		} else {
+			req.Header.Set("If-Match", condition[0])
+		}
 	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -137,7 +190,7 @@ func productWriteBroadcastReadDeleteLifecycle(t *testing.T, hotBytes int64) {
 			t.Fatal(err)
 		}
 	}
-	w := productRequest(nodes[0].api, "PUT", "/api?key=product:42", `{"price":120}`, "test-token")
+	w := productRequest(nodes[0].api, "PUT", "/api?key=product:42", `{"price":120}`, "test-token", `"v1"`)
 	var response mutationResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -162,14 +215,14 @@ func productWriteBroadcastReadDeleteLifecycle(t *testing.T, hotBytes int64) {
 		t.Fatal("new value was not cached at the owner")
 	}
 	// A newly added product must not be rejected by a startup Bloom snapshot.
-	w = productRequest(nodes[1].api, "PUT", "/api?key=product:new", `{"price":1}`, "test-token")
+	w = productRequest(nodes[1].api, "PUT", "/api?key=product:new", `{"price":1}`, "test-token", "*")
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
 	if w = productRequest(nodes[2].api, "GET", "/api?key=product:new", "", ""); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	w = productRequest(nodes[1].api, "DELETE", "/api?key=product:42", "", "test-token")
+	w = productRequest(nodes[1].api, "DELETE", "/api?key=product:42", "", "test-token", `"v2"`)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
@@ -229,7 +282,7 @@ func TestCommittedWriteReportsPartialBroadcast(t *testing.T) {
 	if err := nodes[0].router.Update(members); err != nil {
 		t.Fatal(err)
 	}
-	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token")
+	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token", "*")
 	var response mutationResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -247,7 +300,7 @@ func TestWriteErrorIsAmbiguousAndStillInvalidates(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}, writeErr: errors.New("connection lost")}
 	nodes := productCluster(t, store)
 	_, _ = nodes[1].group.GetLocal(context.Background(), "key")
-	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token")
+	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token", `"v1"`)
 	var response mutationResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -265,6 +318,7 @@ func TestCallerDisconnectDoesNotCancelPostCommitBroadcast(t *testing.T) {
 	_, _ = nodes[2].group.GetLocal(context.Background(), "key")
 	req := httptest.NewRequest("PUT", "/api?key=key", strings.NewReader(`{"v":2}`)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("If-Match", `"v1"`)
 	w := httptest.NewRecorder()
 	nodes[0].api.ServeHTTP(w, req)
 	if w.Code != 200 || ctx.Err() == nil || nodes[2].group.Stats().Entries != 0 {

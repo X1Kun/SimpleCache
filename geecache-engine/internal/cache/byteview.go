@@ -9,7 +9,11 @@ import (
 type ByteView struct {
 	b         []byte
 	expiresAt time.Time
+	version   int64
 }
+
+// Version is the authoritative source version, or zero for an unversioned source.
+func (bv ByteView) Version() int64 { return bv.version }
 
 // RemainingTTL is zero for uncacheable/legacy values and expired results.
 func (bv ByteView) RemainingTTL() time.Duration {

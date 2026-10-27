@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,15 +180,16 @@ func writeJSONLines[T any](path string, values []T) error {
 }
 
 type Mutation struct {
-	Method       string                   `json:"method"`
-	Key          string                   `json:"key"`
-	Status       int                      `json:"status"`
-	Milliseconds float64                  `json:"elapsed_ms"`
-	Committed    *bool                    `json:"source_committed"`
-	Invalidation *peer.InvalidationReport `json:"invalidation"`
+	Method        string                   `json:"method"`
+	Key           string                   `json:"key"`
+	Status        int                      `json:"status"`
+	Milliseconds  float64                  `json:"elapsed_ms"`
+	Committed     *bool                    `json:"source_committed"`
+	SourceVersion *int64                   `json:"source_version,omitempty"`
+	Invalidation  *peer.InvalidationReport `json:"invalidation"`
 }
 
-func mutate(ctx context.Context, client *http.Client, n *node, token, method, key string, value []byte) (Mutation, error) {
+func mutate(ctx context.Context, client *http.Client, n *node, token, method, key string, value []byte, expected int64) (Mutation, error) {
 	result := Mutation{Method: method, Key: key}
 	path := "/api?key="
 	if method == "POST" {
@@ -198,6 +200,9 @@ func mutate(ctx context.Context, client *http.Client, n *node, token, method, ke
 		return result, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
+	if method == "PUT" {
+		req.Header.Set("If-Match", `"v`+strconv.FormatInt(expected, 10)+`"`)
+	}
 	start := time.Now()
 	response, err := client.Do(req)
 	result.Milliseconds = float64(time.Since(start)) / float64(time.Millisecond)
@@ -208,15 +213,17 @@ func mutate(ctx context.Context, client *http.Client, n *node, token, method, ke
 	_ = response.Body.Close()
 	result.Status, result.Milliseconds = response.StatusCode, float64(time.Since(start))/float64(time.Millisecond)
 	var decoded struct {
-		Committed    *bool                    `json:"source_committed"`
-		Invalidation *peer.InvalidationReport `json:"invalidation"`
+		Committed     *bool                    `json:"source_committed"`
+		SourceVersion *int64                   `json:"source_version,omitempty"`
+		Invalidation  *peer.InvalidationReport `json:"invalidation"`
 	}
 	if readErr != nil || json.Unmarshal(body, &decoded) != nil {
 		return result, errors.New("invalid mutation response")
 	}
 	result.Committed, result.Invalidation = decoded.Committed, decoded.Invalidation
-	if method == "PUT" && (decoded.Committed == nil || !*decoded.Committed) {
-		return result, errors.New("source write did not confirm commit")
+	result.SourceVersion = decoded.SourceVersion
+	if method == "PUT" && (decoded.Committed == nil || !*decoded.Committed || decoded.SourceVersion == nil || *decoded.SourceVersion != expected+1) {
+		return result, fmt.Errorf("source mutation did not confirm version %d (HTTP %d)", expected+1, result.Status)
 	}
 	if result.Status != 200 || decoded.Invalidation == nil || !decoded.Invalidation.Complete {
 		return result, errors.New("mutation did not acknowledge complete invalidation")
