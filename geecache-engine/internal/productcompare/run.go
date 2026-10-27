@@ -190,7 +190,7 @@ func Run(ctx context.Context, o Options) (summary Summary, result error) {
 	}
 	summary.Schema = schema
 	table := pgx.Identifier{schema, "simplecache_products"}.Sanitize()
-	if _, err := database.Exec(ctx, "CREATE TABLE "+table+" (key text PRIMARY KEY CHECK (octet_length(key) BETWEEN 1 AND 256), value bytea NOT NULL CHECK (octet_length(value)<=1048576), updated_at timestamptz NOT NULL DEFAULT now())"); err != nil {
+	if _, err := database.Exec(ctx, "CREATE TABLE "+table+" (key text PRIMARY KEY CHECK (octet_length(key) BETWEEN 1 AND 256), value bytea NOT NULL CHECK (octet_length(value)<=1048576), version bigint NOT NULL DEFAULT 1 CHECK(version>0), deleted boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now())"); err != nil {
 		return summary, errors.New("could not create comparison product table")
 	}
 	isolated, err := databaseURL(dsn, schema, "")
@@ -432,7 +432,7 @@ func updateStage(ctx context.Context, client *http.Client, c *cluster, keys []st
 	var trace []Operation
 	start := time.Now()
 	for i, key := range keys {
-		mutation, err := mutate(ctx, client, c.nodes[i%3], c.token, "PUT", key, productValue(key, 2, c.options.ValueBytes))
+		mutation, err := mutate(ctx, client, c.nodes[i%3], c.token, "PUT", key, productValue(key, 2, c.options.ValueBytes), 1)
 		stage.Mutations = append(stage.Mutations, mutation)
 		if err != nil {
 			result = err
@@ -479,7 +479,7 @@ func recoveryStage(ctx context.Context, client *http.Client, c *cluster, key str
 		return stage, result
 	}
 	for attempt := 0; attempt < 3; attempt++ {
-		mutation, err := mutate(ctx, client, c.nodes[0], c.token, "POST", key, nil)
+		mutation, err := mutate(ctx, client, c.nodes[0], c.token, "POST", key, nil, 0)
 		stage.Mutations = append(stage.Mutations, mutation)
 		result = err
 		if err == nil {

@@ -48,3 +48,30 @@ func TestLegacyAndInvalidTTLHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestPeerSourceVersionsAreValidated(t *testing.T) {
+	for _, header := range []string{"", "1", "9223372036854775807", "0", "-1", "01", "+1", "invalid", "9223372036854775808"} {
+		t.Run(header, func(t *testing.T) {
+			body, _ := proto.Marshal(&pb.Response{Value: []byte("value")})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if header != "" {
+					w.Header().Set(VersionHeader, header)
+				}
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			value, err := clientFor(server).GetWithExpiry(context.Background(), "products", "key")
+			if header == "" || header == "1" || header == "9223372036854775807" {
+				var expected int64
+				if header != "" {
+					expected, _ = strconv.ParseInt(header, 10, 64)
+				}
+				if err != nil || value.Version != expected || string(value.Value) != "value" {
+					t.Fatal(value, err)
+				}
+			} else if err == nil {
+				t.Fatal("invalid source version accepted")
+			}
+		})
+	}
+}

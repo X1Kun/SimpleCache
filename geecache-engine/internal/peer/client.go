@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	BasePath     = "/_geecache/"
-	MaxBodyBytes = cache.MaxValueBytes + 1024
-	ErrorHeader  = "X-SimpleCache-Error"
-	TTLHeader    = "X-SimpleCache-TTL-Nanoseconds"
+	BasePath      = "/_geecache/"
+	MaxBodyBytes  = cache.MaxValueBytes + 1024
+	ErrorHeader   = "X-SimpleCache-Error"
+	TTLHeader     = "X-SimpleCache-TTL-Nanoseconds"
+	VersionHeader = "X-SimpleCache-Version"
 )
 
 var ErrGroupNotFound = errors.New("peer group not found")
@@ -76,6 +77,13 @@ func (c *Client) GetWithExpiry(ctx context.Context, group, key string) (cache.Pe
 		return cache.PeerValue{}, cache.ErrValueTooLarge
 	}
 	value := cache.PeerValue{Value: result.Value}
+	if raw := response.Header.Get(VersionHeader); raw != "" {
+		version, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || version <= 0 || strconv.FormatInt(version, 10) != raw {
+			return cache.PeerValue{}, errors.New("invalid peer source version")
+		}
+		value.Version = version
+	}
 	if raw := response.Header.Get(TTLHeader); raw != "" {
 		nanos, err := strconv.ParseInt(raw, 10, 64)
 		if err != nil || nanos < 0 {

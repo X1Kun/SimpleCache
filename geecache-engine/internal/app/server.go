@@ -73,6 +73,9 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
+		if value.Version() > 0 {
+			w.Header().Set("ETag", versionETag(value.Version()))
+		}
 		_, _ = value.WriteTo(w)
 	})
 	if opts.Router != nil && opts.Token != "" {

@@ -59,7 +59,7 @@ func TestPostgresOpenChecksExecutionErrors(t *testing.T) {
 	// Preparation failure remains a rejected startup too.
 	assertRejected()
 	table := quotedSchema + ".simplecache_products"
-	if _, err := admin.Exec(ctx, "CREATE TABLE "+table+" (key text, value bytea)"); err != nil {
+	if _, err := admin.Exec(ctx, "CREATE TABLE "+table+" (key text, value bytea, version bigint, deleted boolean)"); err != nil {
 		t.Fatal(err)
 	}
 	store, err := Open(ctx, isolatedDSN, 1)
@@ -72,7 +72,7 @@ func TestPostgresOpenChecksExecutionErrors(t *testing.T) {
 	}
 	// The view can be prepared/described, but planning its expression during
 	// execution fails even though the outer query asks for zero rows.
-	if _, err := admin.Exec(ctx, "CREATE VIEW "+table+" AS SELECT (1 / 0)::text AS key, ''::bytea AS value"); err != nil {
+	if _, err := admin.Exec(ctx, "CREATE VIEW "+table+" AS SELECT (1 / 0)::text AS key, ''::bytea AS value, 1::bigint AS version, false AS deleted"); err != nil {
 		t.Fatal(err)
 	}
 	probe, err := pgx.Connect(ctx, isolatedDSN)
@@ -80,7 +80,7 @@ func TestPostgresOpenChecksExecutionErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer probe.Close(context.Background())
-	rows, err := probe.Query(ctx, "SELECT key, value FROM simplecache_products LIMIT 0")
+	rows, err := probe.Query(ctx, "SELECT key, value, version, deleted FROM simplecache_products LIMIT 0")
 	if err != nil {
 		t.Fatalf("expected a deferred execution error, Query returned: %v", err)
 	}

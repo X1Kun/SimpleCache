@@ -41,7 +41,7 @@ func TestPostgresProductLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	w := productRequest(nodes[0].api, "PUT", "/api?key="+key, `{"price":120}`, "test-token")
+	w := productRequest(nodes[0].api, "PUT", "/api?key="+key, `{"price":120}`, "test-token", `"v1"`)
 	if w.Code != 200 {
 		t.Fatalf("write/broadcast: %d %s", w.Code, w.Body.String())
 	}
@@ -75,7 +75,7 @@ func TestPostgresProductLifecycle(t *testing.T) {
 			t.Fatalf("manual invalidation: %d %s", w.Code, w.Body.String())
 		}
 	}
-	w = productRequest(nodes[1].api, "DELETE", "/api?key="+key, "", "test-token")
+	w = productRequest(nodes[1].api, "DELETE", "/api?key="+key, "", "test-token", `"v3"`)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}

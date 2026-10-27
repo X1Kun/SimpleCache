@@ -61,7 +61,7 @@ func mixedStage(ctx context.Context, client *http.Client, c *cluster, keys []str
 		written := make(chan writeResult, 1)
 		go func() {
 			<-barrier
-			mutation, err := mutate(ctx, client, c.nodes[window.Write.Node], c.token, "PUT", window.Write.Key, productValue(window.Write.Key, window.Write.Version, c.options.ValueBytes))
+			mutation, err := mutate(ctx, client, c.nodes[window.Write.Node], c.token, "PUT", window.Write.Key, productValue(window.Write.Key, window.Write.Version, c.options.ValueBytes), int64(window.Write.Version-1))
 			if err == nil {
 				committed.Store(int64(window.Write.Version))
 			}
@@ -143,7 +143,7 @@ func finalMixedStage(ctx context.Context, client *http.Client, c *cluster, key s
 	if result != nil {
 		return stage, result
 	}
-	mutation, err := mutate(ctx, client, c.nodes[0], c.token, "POST", key, nil)
+	mutation, err := mutate(ctx, client, c.nodes[0], c.token, "POST", key, nil, 0)
 	stage.Mutations = append(stage.Mutations, mutation)
 	if err != nil {
 		return stage, err

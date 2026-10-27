@@ -95,5 +95,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set(TTLHeader, strconv.FormatInt(int64(value.RemainingTTL()), 10))
+	if value.Version() > 0 {
+		w.Header().Set(VersionHeader, strconv.FormatInt(value.Version(), 10))
+	}
 	_, _ = w.Write(body)
 }
