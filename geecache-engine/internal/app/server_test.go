@@ -126,3 +126,33 @@ func TestHotCacheConfigurationSharesCapacity(t *testing.T) {
 		t.Fatal(c.HotCacheBytes, err)
 	}
 }
+
+func TestAdmissionConfigurationBoundsAndZeroSourceQueue(t *testing.T) {
+	t.Setenv("SOURCE_MODE", "demo")
+	t.Setenv("DISCOVERY_MODE", "static")
+	for _, name := range []string{"SOURCE_MAX_PENDING", "MAX_MISS_WAITERS", "WRITE_MAX_CONCURRENCY"} {
+		t.Setenv(name, "")
+	}
+	c, err := FromEnv(8001, true)
+	if err != nil || c.SourceMaxPending != cache.DefaultSourcePending || c.MaxMissWaiters != cache.DefaultMissWaiters || c.WriteConcurrency != DefaultWriteConcurrency {
+		t.Fatal(c, err)
+	}
+	t.Setenv("SOURCE_MAX_PENDING", "0")
+	c, err = FromEnv(8001, true)
+	if err != nil || c.SourceMaxPending != 0 {
+		t.Fatal("zero queue was defaulted away", c.SourceMaxPending, err)
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"SOURCE_MAX_PENDING", "-1"}, {"SOURCE_MAX_PENDING", "4097"},
+		{"MAX_MISS_WAITERS", "0"}, {"MAX_MISS_WAITERS", "4097"},
+		{"WRITE_MAX_CONCURRENCY", "0"}, {"WRITE_MAX_CONCURRENCY", "257"},
+		{"WRITE_MAX_CONCURRENCY", "invalid"},
+	} {
+		t.Run(tc.name+"-"+tc.value, func(t *testing.T) {
+			t.Setenv(tc.name, tc.value)
+			if _, err := FromEnv(8001, true); err == nil {
+				t.Fatal("invalid admission accepted", tc)
+			}
+		})
+	}
+}

@@ -100,6 +100,38 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(meta.FindStatusCondition(cr.Status.Conditions, "Ready").Reason).To(Equal("InvalidSpec"))
 	})
 
+	It("defaults admission limits and preserves an explicitly disabled source queue", func() {
+		reconcileNow()
+		var sts appsv1.StatefulSet
+		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
+		readEnv := func() map[string]string {
+			result := map[string]string{}
+			for _, entry := range sts.Spec.Template.Spec.Containers[0].Env {
+				result[entry.Name] = entry.Value
+			}
+			return result
+		}
+		env := readEnv()
+		Expect(env["MAX_MISS_WAITERS"]).To(Equal("128"))
+		Expect(env["SOURCE_MAX_PENDING"]).To(Equal("128"))
+		Expect(env["WRITE_MAX_CONCURRENCY"]).To(Equal("16"))
+		getCR()
+		zero := int32(0)
+		cr.Spec.SourceMaxPending = &zero
+		cr.Spec.MaxMissWaiters = 4
+		cr.Spec.MaxConcurrentWrites = 2
+		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
+		getCR()
+		Expect(cr.Spec.SourceMaxPending).NotTo(BeNil())
+		Expect(*cr.Spec.SourceMaxPending).To(BeZero())
+		reconcileNow()
+		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
+		env = readEnv()
+		Expect(env["MAX_MISS_WAITERS"]).To(Equal("4"))
+		Expect(env["SOURCE_MAX_PENDING"]).To(Equal("0"))
+		Expect(env["WRITE_MAX_CONCURRENCY"]).To(Equal("2"))
+	})
+
 	It("wires PostgreSQL Secret references and removes them when returning to demo mode", func() {
 		cr.Spec.SourceSecret = "product-source"
 		Expect(k8sClient.Update(ctx, cr)).To(Succeed())

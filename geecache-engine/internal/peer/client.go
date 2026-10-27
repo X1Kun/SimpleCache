@@ -52,6 +52,9 @@ func (c *Client) GetWithExpiry(ctx context.Context, group, key string) (cache.Pe
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusServiceUnavailable && response.Header.Get(ErrorHeader) == "OVERLOADED" {
+			return cache.PeerValue{}, cache.ErrOverloaded
+		}
 		if response.StatusCode == http.StatusNotFound {
 			switch response.Header.Get(ErrorHeader) {
 			case "KEY_NOT_FOUND":

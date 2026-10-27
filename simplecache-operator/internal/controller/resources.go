@@ -21,6 +21,16 @@ func defaults(cr *cachev1.SimpleCache) {
 	if cr.Spec.TTLSeconds == 0 {
 		cr.Spec.TTLSeconds = 60
 	}
+	if cr.Spec.MaxMissWaiters == 0 {
+		cr.Spec.MaxMissWaiters = 128
+	}
+	if cr.Spec.SourceMaxPending == nil {
+		value := int32(128)
+		cr.Spec.SourceMaxPending = &value
+	}
+	if cr.Spec.MaxConcurrentWrites == 0 {
+		cr.Spec.MaxConcurrentWrites = 16
+	}
 }
 func labels(cr *cachev1.SimpleCache) map[string]string { return map[string]string{"app": cr.Name} }
 func metadata(cr *cachev1.SimpleCache, name string) metav1.ObjectMeta {
@@ -52,6 +62,10 @@ func discoveryBinding(cr *cachev1.SimpleCache) *rbacv1.RoleBinding {
 }
 func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 	resources := resourceDefaults(cr.Spec.Resources)
+	pending := int32(128)
+	if cr.Spec.SourceMaxPending != nil {
+		pending = *cr.Spec.SourceMaxPending
+	}
 	grace := int64(10)
 	env := []corev1.EnvVar{
 		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}},
@@ -61,6 +75,9 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		{Name: "CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.CacheBytes, 10)},
 		{Name: "HOT_CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.HotCacheBytes, 10)},
 		{Name: "TTL_SECONDS", Value: strconv.Itoa(int(cr.Spec.TTLSeconds))},
+		{Name: "MAX_MISS_WAITERS", Value: strconv.Itoa(int(cr.Spec.MaxMissWaiters))},
+		{Name: "SOURCE_MAX_PENDING", Value: strconv.Itoa(int(pending))},
+		{Name: "WRITE_MAX_CONCURRENCY", Value: strconv.Itoa(int(cr.Spec.MaxConcurrentWrites))},
 	}
 	if cr.Spec.SourceSecret != "" {
 		env = append(env, corev1.EnvVar{Name: "SOURCE_MODE", Value: "postgres"})

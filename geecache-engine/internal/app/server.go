@@ -28,6 +28,13 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 	if len(options) > 0 {
 		opts = options[0]
 	}
+	if opts.MaxConcurrentWrites == 0 {
+		opts.MaxConcurrentWrites = DefaultWriteConcurrency
+	}
+	if opts.MaxConcurrentWrites < 1 {
+		panic("write concurrency must be positive")
+	}
+	opts.writeSlots = make(chan struct{}, opts.MaxConcurrentWrites)
 	writable := opts.Store != nil && opts.Router != nil && opts.Token != ""
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -69,6 +76,9 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 		value, err := group.Get(ctx, r.URL.Query().Get("key"))
 		result = cache.Result(err)
 		if err != nil {
+			if errors.Is(err, cache.ErrOverloaded) {
+				w.Header().Set("Retry-After", "1")
+			}
 			http.Error(w, err.Error(), peer.Status(err))
 			return
 		}
@@ -150,8 +160,9 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		groupName = "products"
 	}
 	group := cache.NewGroup(groupName, c.CacheBytes, source, cache.Options{
-		TTL: c.TTL, KnownKeys: knownKeys, Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiter(c.SourceConcurrency), Observer: metrics,
-		HotCacheBytes: c.HotCacheBytes,
+		TTL: c.TTL, KnownKeys: knownKeys, Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiterWithQueue(c.SourceConcurrency, c.SourceMaxPending), Observer: metrics,
+		HotCacheBytes:  c.HotCacheBytes,
+		MaxMissWaiters: c.MaxMissWaiters,
 	})
 	metrics.ObserveCache(group)
 	var watcher *discovery.Watcher
@@ -177,7 +188,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	ready := func() bool { return serving.Load() && (watcher == nil || watcher.Ready()) }
 	servers := []*http.Server{{Addr: c.PeerAddr, Handler: peer.NewHandlerWithToken(c.AdminToken, group), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}}
 	if c.API {
-		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work})
+		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency})
 		servers = append(servers, &http.Server{Addr: c.APIAddr, Handler: api, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second})
 	}
 	if c.DebugAddr != "" {
@@ -198,6 +209,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	if watcher != nil {
 		go watcher.Run(work)
 	}
+	go group.RunMaintenance(work)
 	if c.ProfileContention {
 		previous := runtime.SetMutexProfileFraction(10)
 		runtime.SetBlockProfileRate(1000000)

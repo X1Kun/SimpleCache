@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
 )
 
@@ -20,6 +21,9 @@ type Config struct {
 	HotCacheBytes                            int64
 	TTL                                      time.Duration
 	SourceConcurrency                        int
+	SourceMaxPending                         int
+	MaxMissWaiters                           int
+	WriteConcurrency                         int
 	Members                                  []peer.Member
 	DebugAddr                                string
 	ProfileContention                        bool
@@ -30,6 +34,7 @@ func FromEnv(port int, api bool) (Config, error) {
 	c := Config{PeerAddr: fmt.Sprintf("0.0.0.0:%d", port), APIAddr: "0.0.0.0:9999", API: api,
 		CacheBytes: 64 << 20, TTL: time.Minute, SourceConcurrency: 32, DiscoveryMode: os.Getenv("DISCOVERY_MODE"),
 		Namespace: os.Getenv("POD_NAMESPACE"), PeerService: os.Getenv("PEER_SERVICE"),
+		SourceMaxPending: cache.DefaultSourcePending, MaxMissWaiters: cache.DefaultMissWaiters, WriteConcurrency: DefaultWriteConcurrency,
 	}
 	if port < 1 || port > 65535 {
 		return c, fmt.Errorf("invalid peer port")
@@ -90,6 +95,23 @@ func FromEnv(port int, api bool) (Config, error) {
 			return c, fmt.Errorf("invalid SOURCE_MAX_CONCURRENCY")
 		}
 		c.SourceConcurrency = parsed
+	}
+	for _, item := range []struct {
+		name             string
+		value            *int
+		minimum, maximum int
+	}{
+		{"SOURCE_MAX_PENDING", &c.SourceMaxPending, 0, 4096},
+		{"MAX_MISS_WAITERS", &c.MaxMissWaiters, 1, 4096},
+		{"WRITE_MAX_CONCURRENCY", &c.WriteConcurrency, 1, 256},
+	} {
+		if raw := os.Getenv(item.name); raw != "" {
+			v, err := strconv.Atoi(raw)
+			if err != nil || v < item.minimum || v > item.maximum {
+				return c, fmt.Errorf("invalid %s", item.name)
+			}
+			*item.value = v
+		}
 	}
 	switch c.DiscoveryMode {
 	case "kubernetes":

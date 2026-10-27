@@ -80,6 +80,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, cache.ErrNotFound) {
 			w.Header().Set(ErrorHeader, "KEY_NOT_FOUND")
 		}
+		if errors.Is(err, cache.ErrOverloaded) {
+			w.Header().Set(ErrorHeader, "OVERLOADED")
+			w.Header().Set("Retry-After", "1")
+		}
 		http.Error(w, err.Error(), Status(err))
 		return
 	}

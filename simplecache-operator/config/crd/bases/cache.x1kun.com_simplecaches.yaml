@@ -62,6 +62,23 @@ spec:
               image:
                 minLength: 1
                 type: string
+              maxConcurrentWrites:
+                default: 16
+                description: MaxConcurrentWrites bounds API writes/cache-only invalidations
+                  separately.
+                format: int32
+                maximum: 256
+                minimum: 1
+                type: integer
+              maxMissWaiters:
+                default: 128
+                description: |-
+                  MaxMissWaiters bounds each API/Peer miss-waiter lane and shared route tasks.
+                  Cache hits and probes do not acquire these slots.
+                format: int32
+                maximum: 4096
+                minimum: 1
+                type: integer
               resources:
                 description: ResourceRequirements describes the compute resource requirements.
                 properties:
@@ -126,6 +143,15 @@ spec:
                 format: int32
                 maximum: 10
                 minimum: 1
+                type: integer
+              sourceMaxPending:
+                default: 128
+                description: |-
+                  SourceMaxPending bounds source tasks queued behind executing Getters.
+                  An explicit zero disables the queue; nil defaults to 128.
+                format: int32
+                maximum: 4096
+                minimum: 0
                 type: integer
               sourceSecret:
                 description: |-

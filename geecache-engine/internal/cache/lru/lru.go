@@ -6,11 +6,12 @@ import (
 )
 
 type Cache struct {
-	bytesTotal int64
-	byteNow    int64
-	ll         *list.List
-	cache      map[string]*list.Element
-	onEvicted  func(key string, value Value) // Callback invoked when an entry is removed.
+	bytesTotal   int64
+	byteNow      int64
+	ll           *list.List
+	cache        map[string]*list.Element
+	onEvicted    func(key string, value Value) // Callback invoked when an entry is removed.
+	expireCursor *list.Element
 }
 
 // entry stores a key, value, and expiration in the LRU list.
@@ -42,7 +43,7 @@ func New(bytesTotal int64, onEvicted func(key string, value Value)) *Cache {
 func (c *Cache) Get(key string) (Value, bool) {
 	if e, ok := c.cache[key]; ok {
 		kv := e.Value.(*entry)
-		if !kv.expireAt.IsZero() && time.Now().After(kv.expireAt) {
+		if !kv.expireAt.IsZero() && !kv.expireAt.After(time.Now()) {
 			c.RemoveElement(e)
 			return nil, false
 		}
@@ -70,6 +71,9 @@ func (c *Cache) Remove(key string) {
 }
 
 func (c *Cache) RemoveElement(ele *list.Element) {
+	if c.expireCursor == ele {
+		c.expireCursor = ele.Prev()
+	}
 	c.ll.Remove(ele)
 	kv := ele.Value.(*entry)
 	delete(c.cache, kv.key)
@@ -77,6 +81,34 @@ func (c *Cache) RemoveElement(ele *list.Element) {
 	if c.onEvicted != nil {
 		c.onEvicted(kv.key, kv.value)
 	}
+}
+
+// PruneExpired advances a persistent cursor without copying the key set or
+// touching LRU recency. Caller supplies synchronization. Work stops at both the
+// entry bound and a best-effort time budget (not a real-time scheduling bound).
+func (c *Cache) PruneExpired(now time.Time, limit int, budget time.Duration) (checked, removed int) {
+	if limit <= 0 || budget <= 0 {
+		return
+	}
+	limit = min(limit, c.ll.Len())
+	deadline := time.Now().Add(budget)
+	for checked < limit && time.Now().Before(deadline) {
+		if c.expireCursor == nil {
+			c.expireCursor = c.ll.Back()
+		}
+		if c.expireCursor == nil {
+			break
+		}
+		current := c.expireCursor
+		c.expireCursor = current.Prev()
+		item := current.Value.(*entry)
+		checked++
+		if !item.expireAt.IsZero() && !item.expireAt.After(now) {
+			c.RemoveElement(current)
+			removed++
+		}
+	}
+	return
 }
 
 // Add inserts or updates an entry.

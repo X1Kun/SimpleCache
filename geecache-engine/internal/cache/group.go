@@ -18,6 +18,7 @@ var (
 	ErrInvalidKey         = errors.New("key must contain 1 to 256 bytes")
 	ErrValueTooLarge      = errors.New("value exceeds 1MiB")
 	ErrPreconditionFailed = errors.New("source version precondition failed")
+	ErrOverloaded         = errors.New("cache admission capacity exhausted")
 )
 
 type Getter interface {
@@ -74,9 +75,12 @@ type Options struct {
 	Observer      Observer
 	// EpochBuckets defaults to 256. One reproduces the former group-wide
 	// invalidation barrier for controlled diagnostic comparisons.
-	EpochBuckets  int
-	HotCacheBytes int64
-	HotTTL        time.Duration
+	EpochBuckets    int
+	HotCacheBytes   int64
+	HotTTL          time.Duration
+	MaxMissWaiters  int
+	CleanupInterval time.Duration
+	CleanupBatch    int
 }
 
 type Group struct {
@@ -89,9 +93,13 @@ type Group struct {
 	originFlight singleflight.Group
 	// Fixed stripes bound metadata memory without fencing every unrelated key.
 	// Hash collisions conservatively fence other in-flight loads in that stripe.
-	epochMu sync.Mutex
-	epochs  [256]uint64
-	opts    Options
+	epochMu       sync.Mutex
+	epochs        [256]uint64
+	opts          Options
+	apiWaiters    chan struct{}
+	peerWaiters   chan struct{}
+	routeTasks    chan struct{}
+	maintenanceMu sync.Mutex
 }
 
 func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
@@ -129,7 +137,22 @@ func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
 		opts.HotTTL = time.Second
 	}
 	opts.HotTTL = min(opts.HotTTL, opts.TTL, time.Second)
+	if opts.MaxMissWaiters == 0 {
+		opts.MaxMissWaiters = DefaultMissWaiters
+	}
+	if opts.CleanupInterval == 0 {
+		opts.CleanupInterval = time.Second
+	}
+	if opts.CleanupBatch == 0 {
+		opts.CleanupBatch = 128
+	}
+	if opts.MaxMissWaiters < 1 || opts.CleanupInterval < 0 || opts.CleanupBatch < 1 {
+		panic("invalid admission or cleanup options")
+	}
 	g := &Group{name: name, getter: getter, mainCache: cache{cacheBytes: capacity - opts.HotCacheBytes}, hotCache: cache{cacheBytes: opts.HotCacheBytes}, opts: opts}
+	g.apiWaiters = make(chan struct{}, opts.MaxMissWaiters)
+	g.peerWaiters = make(chan struct{}, opts.MaxMissWaiters)
+	g.routeTasks = make(chan struct{}, opts.MaxMissWaiters)
 	if opts.KnownKeys != nil {
 		g.bloom = newBloomForKeys(opts.KnownKeys)
 	}
@@ -163,6 +186,10 @@ func Result(err error) string {
 		return "ok"
 	case errors.Is(err, ErrNotFound):
 		return "not_found"
+	case errors.Is(err, ErrOverloaded):
+		return "overloaded"
+	case errors.Is(err, ErrPreconditionFailed):
+		return "precondition_failed"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return "timeout"
 	default:
@@ -219,6 +246,10 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	if hit || err != nil {
 		return v, err
 	}
+	if !g.admit(g.apiWaiters, "api_waiter") {
+		return ByteView{}, ErrOverloaded
+	}
+	defer func() { <-g.apiWaiters }()
 	epoch := g.currentEpoch(key)
 	result := g.routeFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.RouteTimeout)
@@ -226,6 +257,12 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 		if v, hit, err := g.lookup(work, key); hit || err != nil {
 			return v, err
 		}
+		// Shared routing outlives canceled callers, so it needs its own bound.
+		// Acquire inside the flight: same-key waiters never each take a slot.
+		if !g.admit(g.routeTasks, "route_task") {
+			return ByteView{}, ErrOverloaded
+		}
+		defer func() { <-g.routeTasks }()
 		if g.opts.Peers != nil {
 			if peer, ok := g.opts.Peers.PickPeer(key); ok {
 				start := time.Now()
@@ -247,6 +284,9 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 					}
 				}
 				if errors.Is(err, ErrNotFound) {
+					return ByteView{}, err
+				}
+				if errors.Is(err, ErrOverloaded) {
 					return ByteView{}, err
 				}
 				if work.Err() != nil {
@@ -282,6 +322,12 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 	if hit || err != nil {
 		return v, err
 	}
+	if countLookup {
+		if !g.admit(g.peerWaiters, "peer_waiter") {
+			return ByteView{}, ErrOverloaded
+		}
+		defer func() { <-g.peerWaiters }()
+	}
 	epoch := g.currentEpoch(key)
 	result := g.originFlight.DoChan(flightKey(epoch, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.SourceTimeout)
@@ -294,6 +340,10 @@ func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (Byt
 		slotResult := "acquired"
 		if err != nil {
 			slotResult = "timeout"
+			if errors.Is(err, ErrOverloaded) {
+				slotResult = "overloaded"
+				g.observe("rejected", "source_queue", 0)
+			}
 			if errors.Is(err, context.Canceled) {
 				slotResult = "canceled"
 			}

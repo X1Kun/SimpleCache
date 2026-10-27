@@ -52,6 +52,26 @@ type SimpleCacheSpec struct {
 	// +kubebuilder:validation:Maximum=3600
 	// +optional
 	TTLSeconds int32 `json:"ttlSeconds,omitempty"`
+	// MaxMissWaiters bounds each API/Peer miss-waiter lane and shared route tasks.
+	// Cache hits and probes do not acquire these slots.
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	// +optional
+	MaxMissWaiters int32 `json:"maxMissWaiters,omitempty"`
+	// SourceMaxPending bounds source tasks queued behind executing Getters.
+	// An explicit zero disables the queue; nil defaults to 128.
+	// +kubebuilder:default=128
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4096
+	// +optional
+	SourceMaxPending *int32 `json:"sourceMaxPending,omitempty"`
+	// MaxConcurrentWrites bounds API writes/cache-only invalidations separately.
+	// +kubebuilder:default=16
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=256
+	// +optional
+	MaxConcurrentWrites int32 `json:"maxConcurrentWrites,omitempty"`
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }

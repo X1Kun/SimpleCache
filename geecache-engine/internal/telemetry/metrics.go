@@ -8,16 +8,21 @@ import (
 )
 
 type Metrics struct {
-	Registry                                            *prometheus.Registry
-	api, peer, source                                   *prometheus.CounterVec
-	local                                               *prometheus.CounterVec
-	fallback                                            *prometheus.CounterVec
-	writes, invalidations, broadcasts                   *prometheus.CounterVec
-	discardedFills                                      *prometheus.CounterVec
-	hotHits                                             prometheus.Counter
-	apiDuration, peerDuration, sourceDuration, slotWait *prometheus.HistogramVec
-	bloom, updates, discoveryErrors                     prometheus.Counter
-	inflight, members                                   prometheus.Gauge
+	Registry                                                   *prometheus.Registry
+	api, peer, source                                          *prometheus.CounterVec
+	local                                                      *prometheus.CounterVec
+	fallback                                                   *prometheus.CounterVec
+	writes, invalidations, broadcasts                          *prometheus.CounterVec
+	discardedFills                                             *prometheus.CounterVec
+	hotHits                                                    prometheus.Counter
+	apiDuration, peerDuration, sourceDuration, slotWait        *prometheus.HistogramVec
+	writeDuration, broadcastDuration                           *prometheus.HistogramVec
+	rejections                                                 *prometheus.CounterVec
+	unknownCommits, cleanupChecks, cleanupRemoved, cleanupBusy prometheus.Counter
+	cleanupDuration                                            prometheus.Histogram
+	writeInflight                                              prometheus.Gauge
+	bloom, updates, discoveryErrors                            prometheus.Counter
+	inflight, members                                          prometheus.Gauge
 }
 
 func New() *Metrics {
@@ -42,6 +47,15 @@ func New() *Metrics {
 	m.peerDuration = histogram("simplecache_peer_duration_seconds")
 	m.sourceDuration = histogram("simplecache_source_duration_seconds")
 	m.slotWait = histogram("simplecache_source_slot_wait_seconds")
+	m.writeDuration = histogram("simplecache_source_write_duration_seconds")
+	m.broadcastDuration = histogram("simplecache_invalidation_broadcast_duration_seconds")
+	m.rejections = counter("simplecache_admission_rejections_total", "kind")
+	m.unknownCommits = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_source_unknown_commits_total", Help: "Source write failures with unknown commit outcome"})
+	m.cleanupChecks = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_cleanup_checked_total", Help: "Entries examined by bounded active expiration"})
+	m.cleanupRemoved = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_cleanup_removed_total", Help: "Expired entries removed by active expiration"})
+	m.cleanupBusy = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_cleanup_busy_total", Help: "Maintenance areas skipped because their cache lock was busy"})
+	m.cleanupDuration = prometheus.NewHistogram(prometheus.HistogramOpts{Name: "simplecache_cleanup_duration_seconds", Help: "Wall time per cache area cleanup attempt", Buckets: []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.002, 0.005, 0.01, 0.05, 0.1, 1}})
+	m.writeInflight = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_write_requests_inflight", Help: "Admitted write/invalidation requests including body, source and fan-out work"})
 	m.bloom = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_bloom_rejections_total", Help: "Bloom definite negatives"})
 	m.updates = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_membership_updates_total", Help: "Changed membership snapshots"})
 	m.discoveryErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_discovery_errors_total", Help: "Discovery list/watch failures"})
@@ -51,6 +65,7 @@ func New() *Metrics {
 	m.Registry.MustRegister(m.writes, m.invalidations, m.broadcasts)
 	m.Registry.MustRegister(m.discardedFills)
 	m.Registry.MustRegister(m.hotHits)
+	m.Registry.MustRegister(m.writeDuration, m.broadcastDuration, m.rejections, m.unknownCommits, m.cleanupChecks, m.cleanupRemoved, m.cleanupBusy, m.cleanupDuration, m.writeInflight)
 	return m
 }
 func (m *Metrics) Observe(operation, result string, elapsed time.Duration) {
@@ -76,10 +91,17 @@ func (m *Metrics) Observe(operation, result string, elapsed time.Duration) {
 		m.bloom.Inc()
 	case "write":
 		m.writes.WithLabelValues(result).Inc()
+		m.writeDuration.WithLabelValues(result).Observe(elapsed.Seconds())
+		if result == "error" || result == "timeout" {
+			m.unknownCommits.Inc()
+		}
 	case "invalidate":
 		m.invalidations.WithLabelValues(result).Inc()
 	case "broadcast":
 		m.broadcasts.WithLabelValues(result).Inc()
+		m.broadcastDuration.WithLabelValues(result).Observe(elapsed.Seconds())
+	case "rejected":
+		m.rejections.WithLabelValues(result).Inc()
 	case "discard_source":
 		m.discardedFills.WithLabelValues("source").Inc()
 	case "discard_hot":
@@ -88,7 +110,17 @@ func (m *Metrics) Observe(operation, result string, elapsed time.Duration) {
 		m.hotHits.Inc()
 	}
 }
-func (m *Metrics) Inflight(delta float64) { m.inflight.Add(delta) }
+func (m *Metrics) Inflight(delta float64)      { m.inflight.Add(delta) }
+func (m *Metrics) WriteInflight(delta float64) { m.writeInflight.Add(delta) }
+
+func (m *Metrics) Cleanup(checked, removed int, elapsed time.Duration, busy bool) {
+	m.cleanupChecks.Add(float64(checked))
+	m.cleanupRemoved.Add(float64(removed))
+	m.cleanupDuration.Observe(elapsed.Seconds())
+	if busy {
+		m.cleanupBusy.Inc()
+	}
+}
 
 // ObserveCache registers logical storage observations for the process's group.
 func (m *Metrics) ObserveCache(group *cache.Group) {
@@ -99,6 +131,10 @@ func (m *Metrics) ObserveCache(group *cache.Group) {
 		prometheus.NewCounterFunc(prometheus.CounterOpts{Name: "simplecache_cache_removals_total", Help: "Cache entries removed by eviction, expiry or invalidation"}, func() float64 { return float64(group.Stats().Removals) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_hot_cache_bytes", Help: "Hot bytes included in total cache bytes"}, func() float64 { return float64(group.Stats().HotBytes) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_hot_cache_capacity_bytes", Help: "Hot share of total logical capacity"}, func() float64 { return float64(group.Stats().HotCapacity) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_api_miss_waiters", Help: "API callers waiting on cache-miss work"}, func() float64 { return float64(group.AdmissionStats().APIWaiters) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_peer_miss_waiters", Help: "Peer callers waiting on local miss work"}, func() float64 { return float64(group.AdmissionStats().PeerWaiters) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_route_tasks_inflight", Help: "Admitted shared route tasks, including tasks outliving callers"}, func() float64 { return float64(group.AdmissionStats().RouteTasks) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_source_pending", Help: "Source tasks queued for execution slots"}, func() float64 { return float64(group.AdmissionStats().SourcePending) }),
 	)
 }
 func (m *Metrics) Membership(count int, changed bool) {

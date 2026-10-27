@@ -20,6 +20,12 @@ func validateSpec(cr *cachev1.SimpleCache) error {
 	if cr.Spec.HotCacheBytes < 0 || cr.Spec.HotCacheBytes >= cr.Spec.CacheBytes {
 		return fmt.Errorf("hotCacheBytes must be nonnegative and below cacheBytes")
 	}
+	if cr.Spec.MaxMissWaiters < 1 || cr.Spec.MaxMissWaiters > 4096 || cr.Spec.MaxConcurrentWrites < 1 || cr.Spec.MaxConcurrentWrites > 256 {
+		return fmt.Errorf("miss waiter or write concurrency budget is invalid")
+	}
+	if cr.Spec.SourceMaxPending != nil && (*cr.Spec.SourceMaxPending < 0 || *cr.Spec.SourceMaxPending > 4096) {
+		return fmt.Errorf("sourceMaxPending must be between 0 and 4096")
+	}
 	for name, q := range cr.Spec.Resources.Requests {
 		if q.Sign() < 0 {
 			return fmt.Errorf("negative request for %s", name)

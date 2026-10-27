@@ -53,7 +53,8 @@ func (c *cache) add(key string, value ByteView, ttl time.Duration) ByteView {
 	return value
 }
 
-// Stats describes local logical storage; expired entries are removed lazily.
+// Stats describes local logical storage; expiry may be removed on lookup or by
+// bounded maintenance. Entries can include expiry not reached by either yet.
 type Stats struct {
 	Bytes       int64  `json:"logical_bytes"`
 	Capacity    int64  `json:"capacity_bytes"`

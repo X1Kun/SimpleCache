@@ -60,7 +60,7 @@ func TestColdHotKey512Waiters(t *testing.T) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-	}), cache.Options{})
+	}), cache.Options{MaxMissWaiters: 512})
 	burst(t, 512, func(int) error {
 		v, e := g.Get(context.Background(), "hot")
 		if e == nil && v.String() != "value" {
@@ -91,7 +91,7 @@ func TestDistinctKeysRespectSourceLimit(t *testing.T) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-	}), cache.Options{Limiter: cache.NewSourceLimiter(8), SourceTimeout: 2 * time.Second, RouteTimeout: 3 * time.Second})
+	}), cache.Options{MaxMissWaiters: 256, Limiter: cache.NewSourceLimiterWithQueue(8, 256), SourceTimeout: 2 * time.Second, RouteTimeout: 3 * time.Second})
 	burst(t, 256, func(i int) error {
 		key := fmt.Sprint(i)
 		v, e := g.Get(context.Background(), key)

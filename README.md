@@ -6,11 +6,13 @@ bounded subset and use best-effort invalidation after writes. Product JSON is
 example data for studying source work, routing cost and recovery.
 
 **Current:** local LRU/TTL, optional short-lived hot copies, consistent-hash
-Peer reads, separate route/source SingleFlight, source concurrency/deadlines,
+Peer reads, separate route/source SingleFlight, bounded miss/source/write admission,
 EndpointSlice routing snapshots and an idempotent Operator. Product reads return
 a source-version ETag; updates/deletes require If-Match,
 and creation requires If-None-Match: *. PostgreSQL checks conditions atomically;
-logical deletions preserve generation across recreation.
+logical deletions preserve generation across recreation. Active expiration runs
+in bounded batches, and separate database-write/fan-out timing metrics expose
+write latency. Overload is an explicit HTTP 503 with Retry-After.
 
 **Agreed next direction:** multiple Gateways route keys directly to cache shards;
 PostgreSQL remains authoritative; version-bearing invalidation is a follow-up
@@ -53,16 +55,18 @@ Existing database volumes need the [explicit schema upgrade](docs/design.md#post
 Follow the walkthrough for conditional mutation examples,
 partial delivery/retry, database-volume handling and consistency limits.
 
-## Checks and investigations
+## Development checks
 
 ```bash
 make check
 make test-operator-ci
 make generated-check k8s-render compose-config
-make postgres-compare COMPARE_QUICK=1  # Functional smoke
-make postgres-compare                  # Three-repeat PG investigation
-make perf                              # Separate-process demo investigation
+make postgres-compare COMPARE_QUICK=1  # Existing functional smoke
 ```
+
+Next, prioritize Gateway routing, multi-instance behavior, Operator integration
+and version-bearing invalidation. Keep necessary development checks and smokes;
+full-chain performance experiments follow once these features work together.
 
 Reports, original measurements and matching binaries are saved under ignored
 bin/reports. Historical Peer-routing/hot results do not establish performance
