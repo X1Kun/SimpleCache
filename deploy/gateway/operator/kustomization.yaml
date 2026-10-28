@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../simplecache-operator/config/default
+images:
+  - name: controller
+    newName: simplecache-operator
+    newTag: gateway
+patches:
+  - target:
+      kind: Deployment
+      name: simplecache-operator-controller-manager
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --enable-gateway

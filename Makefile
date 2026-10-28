@@ -40,6 +40,7 @@ k8s-render:
 	simplecache-operator/bin/kustomize build simplecache-operator/config/default >/dev/null
 	simplecache-operator/bin/kustomize build simplecache-operator/config/samples >/dev/null
 	simplecache-operator/bin/kustomize build deploy/kind/operator >/dev/null
+	simplecache-operator/bin/kustomize build deploy/gateway/operator >/dev/null
 # Version-control operations belong to the user.
 check: fmt-check test race build vet
 
@@ -62,3 +63,7 @@ postgres-compare:
 
 kind-delete:
 	bash scripts/kind/delete.sh
+
+.PHONY: gateway-smoke
+gateway-smoke:
+	python3 scripts/gateway/smoke.py

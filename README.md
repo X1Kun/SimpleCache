@@ -14,11 +14,11 @@ logical deletions preserve generation across recreation. Active expiration runs
 in bounded batches, and separate database-write/fan-out timing metrics expose
 write latency. Overload is an explicit HTTP 503 with Retry-After.
 
-**Agreed next direction:** multiple Gateways route keys directly to cache shards;
-PostgreSQL remains authoritative; version-bearing invalidation is a follow-up
-to the implemented conditional writes.
-Start without cache replicas and add them only for measured recovery needs.
-Gateway routing and durable/version-bearing invalidation remain planned.
+**Gateway mode:** opt into Envoy Gateway v1.9.2 to route canonical query keys
+directly to local cache shards. The Operator manages multi-proxy configuration
+and stable per-shard Services; cache nodes retain discovery for invalidation.
+Legacy Peer routing remains the default. PostgreSQL stays authoritative;
+source-version-bearing invalidation is the next step. Start without cache replicas.
 
 Use the single [project guide](docs/design.md) for
 [current architecture](docs/design.md#current-implementation),
@@ -61,16 +61,16 @@ partial delivery/retry, database-volume handling and consistency limits.
 make check
 make test-operator-ci
 make generated-check k8s-render compose-config
+make gateway-smoke  # Real Envoy + PostgreSQL in a unique disposable Kind cluster
 make postgres-compare COMPARE_QUICK=1  # Existing functional smoke
 ```
 
-Next, prioritize Gateway routing, multi-instance behavior, Operator integration
-and version-bearing invalidation. Keep necessary development checks and smokes;
+Next, implement source-version-bearing invalidation on the Gateway chain. Keep necessary development checks and smokes;
 full-chain performance experiments follow once these features work together.
 
 Reports, original measurements and matching binaries are saved under ignored
 bin/reports. Historical Peer-routing/hot results do not establish performance
-for the planned Gateway architecture. See the [evidence and limits](docs/design.md#observed-results-and-their-limits).
+for the Gateway architecture. See the [evidence and limits](docs/design.md#observed-results-and-their-limits).
 
 The [isolated Kind workflow](docs/design.md#kubernetes-deployment) uses only the
 project's dedicated cluster and kubeconfig. Envtest uses a temporary API server

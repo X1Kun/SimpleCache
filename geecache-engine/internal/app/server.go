@@ -67,13 +67,25 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 			http.Error(w, "not ready", 503)
 			return
 		}
+		if opts.NodeID != "" {
+			w.Header().Set("X-SimpleCache-Node", opts.NodeID)
+		}
 		if isWrite {
 			result = mutate(w, r, group, opts, metrics, false)
 			return
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
 		defer cancel()
-		value, err := group.Get(ctx, r.URL.Query().Get("key"))
+		key, keyErr := requestKey(r, opts.DirectReads)
+		if keyErr != nil {
+			http.Error(w, keyErr.Error(), http.StatusBadRequest)
+			return
+		}
+		get := group.Get
+		if opts.DirectReads {
+			get = group.GetDirect
+		}
+		value, err := get(ctx, key)
 		result = cache.Result(err)
 		if err != nil {
 			if errors.Is(err, cache.ErrOverloaded) {
@@ -142,7 +154,21 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	// The signal context controls shutdown; in-flight work survives the grace period.
 	work, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	router := peer.NewRouterWithToken(c.SelfID, peerReadTimeout, c.AdminToken)
+	if c.ReadRoutingMode == "" {
+		c.ReadRoutingMode = "peer"
+	}
+	if c.ReadRoutingMode != "peer" && c.ReadRoutingMode != "gateway" {
+		return errors.New("unsupported read routing mode")
+	}
+	if c.ReadRoutingMode == "gateway" && c.HotCacheBytes != 0 {
+		return errors.New("gateway routing cannot reserve a hot area")
+	}
+	var router *peer.Router
+	if c.ReadRoutingMode == "gateway" {
+		router = peer.NewDirectory(c.SelfID, peerReadTimeout, c.AdminToken)
+	} else {
+		router = peer.NewRouterWithToken(c.SelfID, peerReadTimeout, c.AdminToken)
+	}
 	defer router.Close()
 	if err := router.Update(c.Members); err != nil {
 		return err
@@ -188,7 +214,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	ready := func() bool { return serving.Load() && (watcher == nil || watcher.Ready()) }
 	servers := []*http.Server{{Addr: c.PeerAddr, Handler: peer.NewHandlerWithToken(c.AdminToken, group), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}}
 	if c.API {
-		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency})
+		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency, DirectReads: c.ReadRoutingMode == "gateway", NodeID: c.SelfID})
 		servers = append(servers, &http.Server{Addr: c.APIAddr, Handler: api, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second})
 	}
 	if c.DebugAddr != "" {

@@ -23,6 +23,10 @@ import (
 
 // SimpleCacheSpec describes the desired read-cache cluster.
 type SimpleCacheSpec struct {
+	// Gateway enables direct key routing through an installed Envoy Gateway.
+	// Omit to retain Peer routing. Requires the controller's --enable-gateway flag.
+	// +optional
+	Gateway *GatewaySpec `json:"gateway,omitempty"`
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=10
@@ -74,6 +78,21 @@ type SimpleCacheSpec struct {
 	MaxConcurrentWrites int32 `json:"maxConcurrentWrites,omitempty"`
 	// +optional
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+}
+
+// GatewaySpec configures this cache's Envoy data plane; the GatewayClass is
+// installed by the cluster administrator and is never owned by SimpleCache.
+type GatewaySpec struct {
+	// +kubebuilder:default=eg
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +optional
+	ClassName string `json:"className,omitempty"`
+	// +kubebuilder:default=2
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=8
+	// +optional
+	Replicas int32 `json:"replicas,omitempty"`
 }
 type SimpleCacheStatus struct {
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`

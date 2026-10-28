@@ -1,9 +1,10 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-10-27. Main 75a6a39 includes PostgreSQL source
-versions and conditional writes; this working tree adds write-path timing,
-bounded admission and active expiration. Historical measurements below refer to their original binaries. Gateway routing and
-version-bearing/durable invalidation remain future work.
+Documentation updated 2026-10-28. Main ea46985 contains source versions,
+conditional writes, bounded admission, timing metrics and active expiration.
+This working tree adds opt-in Envoy Gateway key routing and Operator integration.
+Version-bearing/durable invalidation remains future work; historical measurements
+below refer to their original Peer-routing binaries.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -25,15 +26,29 @@ available for isolated cache and platform diagnostics.
 | Concern | Implemented now | Agreed next direction |
 | --- | --- | --- |
 | Authority | PostgreSQL owns values and per-key increasing versions | Keep PostgreSQL authoritative |
-| Reads | Local cache, optional hot, then preferred Peer/source | Gateway directly selects the cache shard; local miss loads PostgreSQL |
+| Reads | Opt-in Gateway -> local cache/source; legacy Peer routing remains the default | Establish real-chain performance after invalidation semantics |
 | Writes | Authenticated create/update/delete with atomic source-version checks | Business services add their own predicates/transactions as needed |
 | Invalidation | Key-only best-effort HTTP fan-out, 256 local epoch stripes | Version-bearing events plus existing local fill fencing |
 | Expiration | Lookup-time checks plus bounded lifecycle-owned cleanup | Evaluate reclamation behavior under larger working sets |
 | Protection | Bounded API/Peer miss waiters, shared routes, source queue and writes | Validate budgets against real container memory and workloads |
 | Replication | Disposable hot copies, no replicated shard groups | Start without cache replication; add only for measured recovery needs |
-| Deployment | StatefulSet; cache Pods watch EndpointSlices | Multiple Gateways own normal read routing; retain invalidation discovery |
+| Deployment | StatefulSet, optional Envoy Gateway with multiple proxies and stable shard Services | Retain EndpointSlice discovery for invalidation; no cache replica groups |
 
 ### Current read path and protection
+
+Gateway mode (`READ_ROUTING_MODE=gateway`) reads directly:
+
+```text
+client -> Envoy proxy (Maglev hash of canonical query key)
+       -> shard Service (one StatefulSet ordinal) -> cache Pod API
+       -> main LRU; miss -> originFlight -> bounded source task -> PostgreSQL
+```
+
+The cache API uses GetDirect: no routeFlight, second hash decision or Peer read.
+API miss admission, source queue/concurrency limits, cancellation isolation, local
+epoch fencing and TTL maintenance remain. The member directory builds clients
+for invalidation without building a read hash ring. HOT_CACHE_BYTES must be zero.
+The following path describes the default legacy Peer mode:
 
 ```text
 GET /api?key=... -> validate -> main LRU -> optional hot LRU
@@ -151,7 +166,7 @@ exposes Keys(), so newly inserted values cannot be rejected by an old key set.
 
 ### Membership, Operator and lifecycle
 
-The Router uses CRC32 and 100 virtual nodes per member. Stable Kubernetes
+In legacy Peer mode the Router uses CRC32 and 100 virtual nodes per member. Stable Kubernetes
 identity is namespace/podName; IP:port is only the transport address. Updating an
 address does not redefine the node's hash identity. Sort/deduplicate and collision
 handling are deterministic. One update worker builds an immutable ring, clients
@@ -167,7 +182,7 @@ empty valid set. Readiness does not wait for this Pod's own endpoint. Watch
 failures retain the last valid view and record errors; views converge eventually,
 without simultaneous cluster-wide switching. No proactive cache migration occurs.
 
-The Operator creates six resources: a StatefulSet, headless peer Service, API
+The Operator always creates six base resources: a StatefulSet, headless peer Service, API
 ClusterIP Service, ServiceAccount, namespace discovery Role and RoleBinding.
 Reconcile fetches the CR, checks deletion, defaults/validates a copy, applies
 owned resources with CreateOrUpdate, checks rollout, and patches changed Status.
@@ -187,13 +202,19 @@ identity, API defaults and unrelated Pod fields are preserved.
 | maxConcurrentWrites | Default 16, range 1-256; write/invalidation API concurrency |
 | resources | Requests/limits; default CPU request 100m, memory request 128Mi and limit 256Mi |
 | sourceSecret | Optional same-namespace DATABASE_URL and CACHE_ADMIN_TOKEN Secret |
+| gateway | Optional; className defaults to eg, replicas defaults to 2 (1-8); enables direct reads and requires hotCacheBytes=0 |
 
 Resource defaults respect explicitly smaller limits; negative budgets or requests
 exceeding limits are rejected. Status contains observedGeneration, readyReplicas
 and Ready conditions with InvalidSpec, ResourceConflict, ReconcileFailed,
 Reconciling or Ready reasons. Ready checks StatefulSet observed generation,
 ready/updated replicas and revisions, not global ring agreement or ongoing DB
-health. New sets use Parallel; compatible existing immutable policy is preserved.
+health. Gateway mode also waits for the current GatewayClass acceptance,
+Gateway acceptance/programming, HTTPRoute Accepted/ResolvedRefs and Backend/
+BackendTrafficPolicy acceptance. A configured but disabled/unavailable gateway
+reports GatewayUnavailable; unaccepted owned resources report GatewayPending.
+These statuses do not prove simultaneous health/route views on every proxy.
+New sets use Parallel; compatible existing immutable policy is preserved.
 
 Scaling changes replicas without rewriting a PEERS list in the Pod template.
 Image/config/Secret-reference changes may roll Pods. The controller injects
@@ -292,37 +313,59 @@ flowchart TD
 ```
 
 The event path is produced by application code after commit; the current
-PostgreSQL adapter does not automatically publish it. This diagram is a target,
-not a currently runnable Gateway deployment; source versions alone do not add
+PostgreSQL adapter does not automatically publish it. The Gateway read path is now implemented as an opt-in deployment;
+versioned invalidation in this diagram remains a target; source versions alone do not add
 a durable event relay or source-version floor at every cache node.
 
 ### Routing and shard boundaries
 
-A cache shard owns a subset of keys, not a separate PostgreSQL database. A
-first implementation can associate a cache Pod with one shard. A supported
-Gateway policy hashes the canonical data key and directly selects its backend.
-The current /api query key must be extracted/normalized; hashing only /api,
-client IP, or an inconsistent client header does not provide key affinity.
+A cache shard owns a subset of keys, not a separate PostgreSQL database.
+The implementation uses **Envoy Gateway v1.9.2 / Gateway API v1.6.1**;
+BackendTrafficPolicy selects ConsistentHash (Maglev, tableSize 65537) using the
+single `key` query parameter. It uses existing Envoy proxies, not a custom proxy.
+These vendor policies are not portable guarantees of every Gateway API controller.
 
-Use an existing Gateway implementation, not a new in-house HTTP proxy.
-Envoy Gateway is a control-plane/controller option managing Envoy proxies;
-we would supply Gateway API and implementation-specific policy configuration.
-Select and pin its version. BackendTrafficPolicy is one hash-policy option; per-key hashing is not a portable assumption about every Service
-or Gateway API implementation. Verify matching algorithms, parameters, stable
-backend identities and desired membership across Gateway instances. Avoid a
-second unrelated load-balancer selection undoing the mapping. Gateway config
-propagation can briefly differ; define bounded stale-route handling and retries.
+The Operator creates one EnvoyProxy, Gateway, HTTPRoute, Backend and
+BackendTrafficPolicy per cache CR, plus one native ClusterIP Service per shard.
+Each shard Service selects exactly one StatefulSet ordinal. A single Backend
+contains those stable Service IPs, so all endpoints belong to one hash cluster.
+Using several weighted HTTPRoute backendRefs would introduce a separate cluster
+choice and would not provide the same consistent-hash behavior.
 
-Cache nodes retain local cache policy, source coalescing, lifecycle isolation,
-source limits and fill fencing. Normal reads stop making another independent
-hash decision and Peer hop. Reassess routeFlight and hot against this direct
-path; the old two-stage route is not something the target must preserve.
+This design deliberately pays for an ordinary L4 Service translation: Envoy
+hashes stable Service IPs rather than changing Pod IPs, and the selected Service
+has only one Pod candidate. There is no second application HTTP forwarding hop.
+Pod replacement keeps the Service address; deleting/recreating a Service changes
+its identity. StatefulSet ordinals now have an explicit routing purpose without
+requiring PVCs. Services/backend entries grow with the shard count (currently
+bounded at ten); a different stable endpoint mechanism may be preferable at scale.
 
-Invalidation still needs a holder directory or subscription scheme. Until that
-is replaced, retain necessary membership discovery for fan-out, including
-historical/fallback holders; notifying just the newest owner is insufficient.
-The Gateway controller consumes endpoint information for normal read routing,
-while the Operator manages deployment resources and the discovery contract.
+Every proxy actively probes `/readyz` through each shard Service (2s interval,
+1s timeout). Stable backend/configuration/health views give matching key affinity
+across proxies. xDS delivery and health convergence are asynchronous: temporary
+remapping, duplicate loads or request failures remain possible during changes.
+There is no instantaneous global route switch, automatic data migration or warm
+replica failover. Cold shards read the authoritative PostgreSQL source within
+per-process limits. Scaling proxies/caches does not establish a global DB quota.
+
+**Gateway mode API contract:** exactly one `key` parameter, canonical UTF-8 URL
+encoding, uppercase percent escapes, `%20` for spaces, and no other parameters.
+For example `key=product%3A42` is accepted; raw `key=product:42`, lowercase
+`%3a`, `+` for space, duplicate keys and extra parameters return 400 before
+source access. Envoy hashes the raw wire value, so rejecting alternate encodings
+prevents one decoded source key acquiring multiple placements. GET, conditional
+PUT/DELETE and POST /invalidate share this rule. Ordinary URL encoding libraries
+can produce it; the legacy Peer-mode API retains its original query behavior.
+`X-SimpleCache-Node` identifies the responding worker for functional checks and
+diagnosis; it is not a consistency or placement authority.
+
+Cache nodes still discover ready members for best-effort invalidation fan-out,
+including copies left by earlier routing views. They retain scoped EndpointSlice
+RBAC; this stage does not claim to remove all API watches from cache Pods.
+Gateway mode bypasses normal read forwarding, routeFlight and hot copies while
+preserving source coalescing, bounded work, lifecycle isolation and fill fencing.
+The old ClusterIP `<name>-api` remains an internal diagnostic/bypass entry;
+clients needing affinity must enter through the Envoy Service.
 
 ### Freshness, source versions and safe writes
 
@@ -412,6 +455,7 @@ demo uses SELF_ADDR and comma-separated PEERS HTTP URLs.
 
 | Environment | Default / contract |
 | --- | --- |
+| READ_ROUTING_MODE | peer; gateway skips read forwarding and requires canonical key queries and HOT_CACHE_BYTES=0 |
 | CACHE_BYTES | 64MiB logical key/value total, range 1-128MiB |
 | HOT_CACHE_BYTES | 0, reserved from total, must be below CACHE_BYTES |
 | TTL_SECONDS | 60, range 1-3600 |
@@ -547,6 +591,72 @@ images. Existing unrelated clusters are not used. If the module proxy is
 unreachable, GOPROXY=https://goproxy.cn,direct make kind-up forwards it to image
 builds too; checksum verification stays enabled. No image is published.
 
+### Envoy Gateway deployment and smoke
+
+Use an existing compatible Kubernetes cluster only for an explicitly chosen
+installation. The automated smoke below always creates a unique dedicated Kind
+cluster and kubeconfig, and attempts cleanup of that cluster in `finally`;
+cleanup failures are recorded and fail the run. Existing clusters
+and kubeconfig contexts are not modified.
+
+```bash
+make gateway-smoke
+# If the default Go module mirror is unreachable:
+GOPROXY=https://goproxy.cn,direct make gateway-smoke
+```
+
+Requirements: Linux amd64/arm64, Docker, kubectl, Python 3, curl,
+sha256sum, and the project's Go/build tooling. The smoke downloads and verifies
+Kind v0.33.0 into ignored project bin rather than replacing the system Kind;
+the node image is Kubernetes v1.36.4 pinned by digest. The temporary control plane stores
+its etcd data on the node's /tmp tmpfs to avoid host-disk fsync stalls;
+PostgreSQL keeps its normal durability settings. This does not test etcd crash
+recovery or control-plane storage durability. It builds the
+production Dockerfiles locally, installs the pinned official Gateway bundle,
+starts PostgreSQL and the Operator, and uses three/four cache shards with two
+Envoy proxy replicas. It is a functional test, not a latency/throughput experiment.
+The smoke retags the digest-verified Envoy platform image for offline Kind loading
+and applies that tag to its owned EnvoyProxy; Docker image archives do not retain
+the upstream multi-platform index reference. Normal Operator deployments keep
+Envoy Gateway's pinned image default. PostgreSQL must finish initialization before
+the cache CR is created; its TCP readiness check excludes the temporary Unix-only
+initialization server.
+The official installation YAML is downloaded to ignored Operator bin and checked
+against the published release SHA256. Envtest reuses the six actual upstream
+CRDs rather than permissive test substitutes.
+
+For a manual installation, `bash scripts/gateway/fetch.sh` prepares
+`simplecache-operator/bin/gateway-v1.9.2/install.yaml`. Install this upstream
+bundle with server-side apply, enable
+`extensionApis.enableBackend: true` in `envoy-gateway-config`, and restart the
+Envoy Gateway controller. This Backend extension is required for stable shard
+Service addresses. Install the cluster-admin-owned GatewayClass, enable the
+Operator's `--enable-gateway` flag (overlay: `deploy/gateway/operator`), and set
+`spec.gateway: {className: eg, replicas: 2}` on the cache CR. The example
+`deploy/gateway/cache.yaml` expects a separately provisioned PostgreSQL/schema
+and same-namespace `products` source Secret. Gateway-related CRDs must be
+installed before starting an Operator with the flag; default installations do
+not watch missing gateway APIs. Removing spec.gateway returns to legacy mode and
+removes only gateway resources/shard Services owned by that CR, never the shared
+GatewayClass. Changing routing mode rolls cache Pods and should be coordinated
+as a mode transition, not described as uninterrupted traffic migration.
+
+The proxy Service is ClusterIP, HTTP port 80. Expose it through your chosen
+cluster entry point, or port-forward that Service for local checks:
+
+```bash
+# In a separate terminal; use the explicitly chosen cluster/context.
+GATEWAY_SVC=$(kubectl -n envoy-gateway-system get svc \
+  -l gateway.envoyproxy.io/owning-gateway-name=products,gateway.envoyproxy.io/owning-gateway-namespace=default \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n envoy-gateway-system port-forward "svc/$GATEWAY_SVC" 8080:80
+# From another terminal:
+curl -fsS --get --data-urlencode 'key=product:42' http://127.0.0.1:8080/api
+```
+
+Only /api and /invalidate are routed publicly. Worker health and metrics remain
+available through their internal API/Pod addresses.
+
 ## Validation and evidence
 
 ### Commands and reports
@@ -558,6 +668,7 @@ make test-operator-ci  # Isolated API server/etcd, race and controller coverage
 make compose-config
 make generated-check
 make k8s-render
+make gateway-smoke    # Unique isolated cluster; real Envoy + PostgreSQL
 make validate          # Engine race plus bounded adversarial diagnostics/profiles
 make postgres-compare  # Three-repeat PostgreSQL comparison
 make postgres-compare COMPARE_QUICK=1
@@ -733,7 +844,7 @@ mixed independent update and returned unknown commit status; its failed report
 is retained, and the independent rerun passed. These checks establish functional
 behavior, not a new latency/throughput baseline.
 
-The operational-protection working tree passed engine race/vet, Operator
+The merged operational-protection change passed engine race/vet, Operator
 lint/envtest, generated/render/config checks, the four real-PG integration tests,
 and a separate 15-trial / 30,732-read quick comparison. The new contract tests
 cover separate admission lanes, cancellation with surviving shared work, queue
@@ -745,6 +856,37 @@ See [verification](../bin/reports/20261027T041517Z-runtime-protection-xkensxq4/v
 and the [quick report](../bin/reports/20261027T041905Z-postgres-compare-loPwVdXV/report.md).
 This validates bounded admitted work and functionality, not a process RSS bound,
 a full container memory stress test, or a new throughput/latency improvement.
+
+### Gateway functional verification
+
+The [2026-10-28 Gateway smoke](../bin/reports/20261028T133506Z-gateway-a4c9a3/result.json)
+passed eight checks with two actual Envoy proxies, three/four cache Pods and
+PostgreSQL on an isolated Kubernetes v1.36.4 Kind node. It verified 49 distinct
+JSON values (including a Unicode/space/plus/slash key), matching key-to-shard
+mappings through both proxies, 49 startup Getter calls and zero additional
+Getter calls on stable repeats. Per-worker metrics showed no Peer forwarding.
+
+Conditional update/read/delete worked through the proxies: source version 1
+became 2, the old version's write returned 412, and deletion returned 404 on
+subsequent reads. Pod replacement kept its shard Service IP and restored the same
+mapping after health convergence. Expansion from three to four shards moved 10
+of the remaining 48 keys; shrinking restored their original mappings. These small
+counts check behavior, not a distribution/performance guarantee.
+
+Startup work is retained separately because route/configuration and health views
+can converge at different times. Stable repeat deltas are checked only after
+affinity converges; the test does not require globally unique loads during changes.
+The [verification index](../bin/reports/20261028T133506Z-gateway-a4c9a3/verification.json)
+also records engine race/vet, Operator lint/unit/race/envtest, generated/format/
+render/Compose checks and script syntax. The test cluster and its temporary image
+tag were cleaned successfully. The report retains image IDs, manifests, logs and
+worker metrics.
+
+This is a single-host functional check using port-forwards to each proxy, with
+temporary control-plane etcd on tmpfs and the same digest-verified Envoy image
+retagged for offline loading. It does not establish production latency,
+throughput, multi-host availability, control-plane durability or linearizable
+cache reads. Source-version-bearing invalidation remains the next functional step.
 
 ### Diagnosis, metrics and CI
 
@@ -793,51 +935,33 @@ loopback-only mux; it is never exposed by public API/Peer handlers or Operator
 Services. Contention profiling is opt-in. Do not profile while establishing an
 unprofiled baseline. Repeated baselines remain separate from profiled results.
 
-[CI](../.github/workflows/ci.yml) runs format/vet/race, diagnostics, builds,
+[CI](../.github/workflows/ci.yml) can be started manually with workflow_dispatch;
+automatic push/PR triggers are temporarily paused during architecture development.
+It runs format/vet/race, diagnostics, builds,
 Compose/startup, generated/render checks, Operator envtest and dedicated PG
 integration/quick comparison. Failed runs also upload available artifacts.
-The [container workflow](../.github/workflows/containers.yml) builds without
-publishing. CI does not run Kind or the heavy manual investigations.
+The [container workflow](../.github/workflows/containers.yml) is also manual-only
+and builds without publishing. CI does not run Kind or the heavy manual investigations.
 
 ## Delivery plan
 
-Priority clarified on 2026-10-27: first deliver a runnable, explainable target
-system, then establish performance results on that real chain. Main 75a6a39 has
-source versions, ETags and conditional mutations. The current commit completes
-write/fan-out timing, bounded admission and active TTL maintenance, including
-Operator settings and behavior tests; it is a runtime-protection change, not
-completion of Gateway routing or a system-level performance claim.
-
-The next work follows four decisions:
-
-1. Retain existing evidence for local coalescing, avoided duplicate source work,
-   conditional writes and reads during scaling. Do not expand the old Peer-route
-   performance suite before target functionality is ready.
-2. The client -> Gateway -> cache Pod -> PostgreSQL chain is not yet deployed.
-   Existing measurements cannot establish its end-to-end benefit or component
-   latency; new counters and timings are diagnostic infrastructure.
-3. Prioritize existing Envoy Gateway integration: canonical key routing,
-   multi-Gateway affinity/configuration behavior and Operator deployment support;
-   also implement source-version-bearing invalidation with bounded metadata and
-   explicit out-of-order/late-fill handling.
-4. Keep development validation to necessary unit/race tests, lint/envtest and
-   functional smokes. After the combined chain works, run dedicated end-to-end,
-   phase-timing, invalidation-order, sustained read/write and recovery experiments.
+Priority remains functionality first, real-chain performance afterward.
+Runtime protection and conditional writes are merged. This stage implements the
+Gateway read path, multi-proxy configuration, stable shard addressing and Operator
+integration, retaining the legacy mode for existing workflows.
 
 | Stage | Work | Acceptance |
 | --- | --- | --- |
-| Ready to commit | Runtime timing, bounded admission and active TTL cleanup | Separate DB/fan-out observations, bounded admitted work, usable hit/probe paths, cancellation/recovery and safe incremental cleanup; existing functional regressions pass |
-| Next: functional architecture | Envoy Gateway key routing, multiple Gateway instances and Operator integration | Same canonical key selects the expected shard under stable views; stable backend identity, bounded configuration transitions and no routine cache-to-cache read hop |
-| Next: invalidation semantics | Carry committed source versions to holders and retain local epoch fencing | Old/duplicate events do not move known versions backwards; late fills, deletion/recreation and reconnect behavior have defined bounds; no unbounded per-key metadata |
-| Combined functional smoke | PostgreSQL + Gateway + cache Pods | Authenticated conditional writes, reads through each Gateway, invalidation and owner replacement work together without implying instantaneous global freshness |
-| After functionality | Real-chain experiments | Measure client end-to-end and component latency, notification ordering/old-version windows, multiple TTL cycles, sustained read/write and fault/recovery under declared equal budgets |
-| Conditional | Cache replicas or durable event relay | Add only against measured cold-recovery needs or an explicit durable-notification requirement, with independent reconnect/failure acceptance |
+| This stage | Envoy Gateway and Operator integration | Canonical-key affinity across two actual proxies; no routine Peer read; stable identity after Pod replacement; scale up/down and conditional-write smoke |
+| Next | Version-bearing invalidation with bounded metadata | Old/duplicate events do not move known versions backwards; define late-fill, deletion/recreation and metadata eviction/reconnect behavior |
+| Combined semantics check | PostgreSQL + Gateway + cache Pods | Exercise versioned events and conditional writes across route/health changes, explicitly allowing a stale-read window |
+| After functionality | Real-chain experiments | Measure end-to-end and component latency, multiple TTL cycles, sustained read/write, invalidation ordering and fault/recovery under equal declared budgets |
+| Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 
-The 15-trial quick comparison checks existing behavior and fixtures; it is not a
-performance baseline or a substitute for Gateway integration. Gateway/controller
-configuration and source-version event semantics remain the implementation
-priority after this commit. Do not interleave that work with new microbenchmarks,
-parameter sweeps or efforts to improve historical local performance numbers.
+Keep the existing local/Peer experiment evidence. Do not treat the functional
+Gateway smoke or its observed key movement as a production SLO, benchmark or
+linearizability proof. Source-version-bearing invalidation is the next functional
+commit; Outbox/CDC and cache replication are separate decisions.
 
 Start without cache replica groups; PostgreSQL remains authoritative. Strong
 cache consensus, Sidecar/DaemonSet deployment and HPA are not first-stage

@@ -21,6 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"time"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -37,7 +40,8 @@ import (
 
 type SimpleCacheReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme        *runtime.Scheme
+	EnableGateway bool
 }
 
 // +kubebuilder:rbac:groups=cache.x1kun.com,resources=simplecaches,verbs=get;list;watch
@@ -46,6 +50,9 @@ type SimpleCacheReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gateways;httproutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=gatewayclasses,verbs=get;list;watch
+// +kubebuilder:rbac:groups=gateway.envoyproxy.io,resources=envoyproxies;backends;backendtrafficpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
 func (r *SimpleCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -64,6 +71,11 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 		return ctrl.Result{}, nil
 	}
+	if desired.Spec.Gateway != nil {
+		if err := r.checkGatewayClass(ctx, desired); err != nil {
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.setStatus(ctx, &cr, 0, metav1.ConditionFalse, "GatewayUnavailable", err.Error())
+		}
+	}
 	objects := []client.Object{account(desired), discoveryRole(desired), discoveryBinding(desired), peerService(desired), apiService(desired), statefulSet(desired)}
 	for _, wanted := range objects {
 		if err := r.ensure(ctx, &cr, wanted); err != nil {
@@ -79,6 +91,19 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, err
 		}
 	}
+	gatewayMessage := ""
+	if desired.Spec.Gateway != nil {
+		var err error
+		gatewayMessage, err = r.reconcileGateway(ctx, desired)
+		if err != nil {
+			if statusErr := r.setStatus(ctx, &cr, 0, metav1.ConditionFalse, "GatewayReconcileFailed", err.Error()); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return ctrl.Result{}, err
+		}
+	} else if err := r.removeGateway(ctx, desired); err != nil {
+		return ctrl.Result{}, err
+	}
 	var sts appsv1.StatefulSet
 	if err := r.Get(ctx, req.NamespacedName, &sts); err != nil {
 		return ctrl.Result{}, err
@@ -91,7 +116,16 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		condition.Reason = "Ready"
 		condition.Message = "All desired cache replicas are ready"
 	}
-	return ctrl.Result{}, r.setStatus(ctx, &cr, sts.Status.ReadyReplicas, condition.Status, condition.Reason, condition.Message)
+	if gatewayMessage != "" {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "GatewayPending"
+		condition.Message = gatewayMessage
+	}
+	result := ctrl.Result{}
+	if desired.Spec.Gateway != nil {
+		result.RequeueAfter = 5 * time.Second
+	}
+	return result, r.setStatus(ctx, &cr, sts.Status.ReadyReplicas, condition.Status, condition.Reason, condition.Message)
 }
 
 func (r *SimpleCacheReconciler) setStatus(ctx context.Context, cr *cachev1.SimpleCache, ready int32, status metav1.ConditionStatus, reason, message string) error {
@@ -120,6 +154,11 @@ func (r *SimpleCacheReconciler) ensure(ctx context.Context, owner *cachev1.Simpl
 			return err
 		}
 		switch current := actual.(type) {
+		case *unstructured.Unstructured:
+			spec := wanted.(*unstructured.Unstructured).Object["spec"]
+			if !desiredSubset(current.Object["spec"], spec) {
+				current.Object["spec"] = runtime.DeepCopyJSONValue(spec)
+			}
 		case *corev1.Service:
 			spec := wanted.(*corev1.Service).Spec
 			if spec.ClusterIP == corev1.ClusterIPNone && current.Spec.ClusterIP != "" && current.Spec.ClusterIP != corev1.ClusterIPNone {
@@ -160,7 +199,16 @@ func (r *SimpleCacheReconciler) ensure(ctx context.Context, owner *cachev1.Simpl
 	return err
 }
 func (r *SimpleCacheReconciler) SetupWithManager(manager ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(manager).For(&cachev1.SimpleCache{}).
+	builder := ctrl.NewControllerManagedBy(manager).For(&cachev1.SimpleCache{}).
 		Owns(&appsv1.StatefulSet{}).Owns(&corev1.Service{}).Owns(&corev1.ServiceAccount{}).
-		Owns(&rbacv1.Role{}).Owns(&rbacv1.RoleBinding{}).Named("simplecache").Complete(r)
+		Owns(&rbacv1.Role{}).Owns(&rbacv1.RoleBinding{})
+	if r.EnableGateway {
+		for _, gvk := range gatewayKinds {
+			if _, err := manager.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+				return fmt.Errorf("install gateway CRDs before --enable-gateway: %w", err)
+			}
+			builder = builder.Owns(gatewayObject(gvk, "", ""))
+		}
+	}
+	return builder.Named("simplecache").Complete(r)
 }

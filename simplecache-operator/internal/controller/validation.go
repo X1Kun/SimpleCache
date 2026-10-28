@@ -11,6 +11,9 @@ import (
 )
 
 func validateSpec(cr *cachev1.SimpleCache) error {
+	if err := validateGateway(cr); err != nil {
+		return err
+	}
 	if cr.Spec.SourceSecret != "" && len(validation.IsDNS1123Subdomain(cr.Spec.SourceSecret)) != 0 {
 		return fmt.Errorf("sourceSecret must be a valid Secret name")
 	}
@@ -68,4 +71,19 @@ func resourceDefaults(input corev1.ResourceRequirements) corev1.ResourceRequirem
 		result.Limits[corev1.ResourceMemory] = limit
 	}
 	return result
+}
+
+func validateGateway(cr *cachev1.SimpleCache) error {
+	if g := cr.Spec.Gateway; g != nil {
+		if len(validation.IsDNS1123Subdomain(g.ClassName)) != 0 || g.Replicas < 1 || g.Replicas > 8 {
+			return fmt.Errorf("gateway className or replica count is invalid")
+		}
+		if len(cr.Name) > 55 || len(validation.IsDNS1123Label(cr.Name)) != 0 {
+			return fmt.Errorf("gateway mode requires a DNS label name of at most 55 characters")
+		}
+		if cr.Spec.HotCacheBytes != 0 {
+			return fmt.Errorf("gateway mode requires hotCacheBytes=0")
+		}
+	}
+	return nil
 }
