@@ -28,6 +28,7 @@ type Config struct {
 	DebugAddr                                string
 	ProfileContention                        bool
 	SourceMode, DatabaseURL, AdminToken      string
+	ReadRoutingMode                          string
 }
 
 func FromEnv(port int, api bool) (Config, error) {
@@ -41,6 +42,13 @@ func FromEnv(port int, api bool) (Config, error) {
 	}
 	if c.DiscoveryMode == "" {
 		c.DiscoveryMode = "static"
+	}
+	c.ReadRoutingMode = os.Getenv("READ_ROUTING_MODE")
+	if c.ReadRoutingMode == "" {
+		c.ReadRoutingMode = "peer"
+	}
+	if c.ReadRoutingMode != "peer" && c.ReadRoutingMode != "gateway" {
+		return c, fmt.Errorf("unsupported READ_ROUTING_MODE")
 	}
 	c.SourceMode = os.Getenv("SOURCE_MODE")
 	if c.SourceMode == "" {
@@ -88,6 +96,9 @@ func FromEnv(port int, api bool) (Config, error) {
 			return c, fmt.Errorf("invalid HOT_CACHE_BYTES")
 		}
 		c.HotCacheBytes = parsed
+	}
+	if c.ReadRoutingMode == "gateway" && c.HotCacheBytes != 0 {
+		return c, fmt.Errorf("gateway routing requires HOT_CACHE_BYTES=0")
 	}
 	if v := os.Getenv("SOURCE_MAX_CONCURRENCY"); v != "" {
 		parsed, err := strconv.Atoi(v)

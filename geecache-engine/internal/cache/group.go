@@ -300,33 +300,43 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 				// Transport, protocol and unknown-group failures fall back to the local source.
 			}
 		}
-		return g.getLocal(work, key, false)
+		return g.getLocal(work, key, "")
 	})
 	return await(ctx, result)
 }
 
 // GetLocal never selects a peer. Source work has its own bounded lifecycle.
 func (g *Group) GetLocal(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, true)
+	return g.getLocal(ctx, key, "peer")
 }
 
-func (g *Group) getLocal(ctx context.Context, key string, countLookup bool) (ByteView, error) {
+// GetDirect is the public Gateway-mode read path: API admission and source
+// coalescing, with neither routeFlight nor an outgoing Peer request.
+func (g *Group) GetDirect(ctx context.Context, key string) (ByteView, error) {
+	return g.getLocal(ctx, key, "api")
+}
+
+func (g *Group) getLocal(ctx context.Context, key string, lookupKind string) (ByteView, error) {
 	v, hit, err := g.lookup(ctx, key)
-	if countLookup {
+	if lookupKind != "" {
 		result := "miss"
 		if hit {
 			result = "hit"
 		}
-		g.observe("lookup_peer", result, 0)
+		g.observe("lookup_"+lookupKind, result, 0)
 	}
 	if hit || err != nil {
 		return v, err
 	}
-	if countLookup {
-		if !g.admit(g.peerWaiters, "peer_waiter") {
+	if lookupKind != "" {
+		lane := g.peerWaiters
+		if lookupKind == "api" {
+			lane = g.apiWaiters
+		}
+		if !g.admit(lane, lookupKind+"_waiter") {
 			return ByteView{}, ErrOverloaded
 		}
-		defer func() { <-g.peerWaiters }()
+		defer func() { <-lane }()
 	}
 	epoch := g.currentEpoch(key)
 	result := g.originFlight.DoChan(flightKey(epoch, key), func() (any, error) {

@@ -30,6 +30,8 @@ type APIOptions struct {
 	Lifecycle           context.Context
 	MaxConcurrentWrites int
 	writeSlots          chan struct{}
+	DirectReads         bool
+	NodeID              string
 }
 
 const DefaultWriteConcurrency = 16
@@ -48,7 +50,11 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	key := r.URL.Query().Get("key")
+	key, keyErr := requestKey(r, opts.DirectReads)
+	if keyErr != nil {
+		http.Error(w, keyErr.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := cache.ValidateKey(key); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

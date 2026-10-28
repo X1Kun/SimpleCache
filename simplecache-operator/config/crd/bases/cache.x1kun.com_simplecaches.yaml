@@ -51,6 +51,23 @@ spec:
                 maximum: 134217728
                 minimum: 1048576
                 type: integer
+              gateway:
+                description: |-
+                  Gateway enables direct key routing through an installed Envoy Gateway.
+                  Omit to retain Peer routing. Requires the controller's --enable-gateway flag.
+                properties:
+                  className:
+                    default: eg
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  replicas:
+                    default: 2
+                    format: int32
+                    maximum: 8
+                    minimum: 1
+                    type: integer
+                type: object
               hotCacheBytes:
                 description: |-
                   HotCacheBytes reserves part of CacheBytes for remote read replicas.

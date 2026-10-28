@@ -12,6 +12,14 @@ import (
 )
 
 func defaults(cr *cachev1.SimpleCache) {
+	if cr.Spec.Gateway != nil {
+		if cr.Spec.Gateway.ClassName == "" {
+			cr.Spec.Gateway.ClassName = "eg"
+		}
+		if cr.Spec.Gateway.Replicas == 0 {
+			cr.Spec.Gateway.Replicas = 2
+		}
+	}
 	if cr.Spec.Size == 0 {
 		cr.Spec.Size = 3
 	}
@@ -78,6 +86,9 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		{Name: "MAX_MISS_WAITERS", Value: strconv.Itoa(int(cr.Spec.MaxMissWaiters))},
 		{Name: "SOURCE_MAX_PENDING", Value: strconv.Itoa(int(pending))},
 		{Name: "WRITE_MAX_CONCURRENCY", Value: strconv.Itoa(int(cr.Spec.MaxConcurrentWrites))},
+	}
+	if cr.Spec.Gateway != nil {
+		env = append(env, corev1.EnvVar{Name: "READ_ROUTING_MODE", Value: "gateway"})
 	}
 	if cr.Spec.SourceSecret != "" {
 		env = append(env, corev1.EnvVar{Name: "SOURCE_MODE", Value: "postgres"})

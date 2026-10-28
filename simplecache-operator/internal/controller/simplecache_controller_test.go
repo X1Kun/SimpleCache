@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	cachev1 "x1kun.com/simplecache-operator/api/v1"
@@ -299,7 +300,8 @@ var _ = Describe("SimpleCache controller contract", func() {
 	})
 
 	It("repairs deleted children through the registered watch", func() {
-		manager, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: k8sClient.Scheme(), Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
+		skipNameValidation := true
+		manager, err := ctrl.NewManager(cfg, ctrl.Options{Scheme: k8sClient.Scheme(), Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation}, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0"})
 		Expect(err).NotTo(HaveOccurred())
 		reconciler := &SimpleCacheReconciler{Client: manager.GetClient(), Scheme: manager.GetScheme()}
 		Expect(reconciler.SetupWithManager(manager)).To(Succeed())

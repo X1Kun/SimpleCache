@@ -25,12 +25,13 @@ type snapshot struct {
 	members []Member
 }
 type Router struct {
-	selfID   string
-	client   *http.Client
-	timeout  time.Duration
-	token    string
-	updateMu sync.Mutex
-	state    atomic.Pointer[snapshot]
+	selfID      string
+	client      *http.Client
+	timeout     time.Duration
+	token       string
+	updateMu    sync.Mutex
+	state       atomic.Pointer[snapshot]
+	readRouting bool
 }
 
 func NewRouter(selfID string, timeout time.Duration) *Router {
@@ -38,13 +39,23 @@ func NewRouter(selfID string, timeout time.Duration) *Router {
 }
 
 func NewRouterWithToken(selfID string, timeout time.Duration, token string) *Router {
+	return newRouter(selfID, timeout, token, true)
+}
+
+// NewDirectory keeps invalidation membership/clients without building a read
+// hash ring; Gateway-mode workers do not perform another routing decision.
+func NewDirectory(selfID string, timeout time.Duration, token string) *Router {
+	return newRouter(selfID, timeout, token, false)
+}
+
+func newRouter(selfID string, timeout time.Duration, token string, readRouting bool) *Router {
 	if selfID == "" || timeout <= 0 {
 		panic("invalid router identity or timeout")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 32
-	r := &Router{selfID: selfID, timeout: timeout, token: token, client: &http.Client{
+	r := &Router{selfID: selfID, timeout: timeout, token: token, readRouting: readRouting, client: &http.Client{
 		Transport: transport, Timeout: timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}}
@@ -76,9 +87,14 @@ func (r *Router) Update(input []Member) error {
 	if previous != nil && sameMembers(previous.members, normalized) {
 		return nil
 	}
-	next := &snapshot{ring: hashring.New(100, nil), clients: make(map[string]*Client), members: normalized}
+	next := &snapshot{clients: make(map[string]*Client), members: normalized}
+	if r.readRouting {
+		next.ring = hashring.New(100, nil)
+	}
 	for _, m := range normalized {
-		next.ring.Add(m.ID)
+		if next.ring != nil {
+			next.ring.Add(m.ID)
+		}
 		next.clients[m.ID] = &Client{address: m.Address, http: r.client, timeout: r.timeout, token: r.token}
 	}
 	r.state.Store(next)
@@ -105,6 +121,9 @@ func sameMembers(a, b []Member) bool {
 }
 func (r *Router) PickPeer(key string) (cache.PeerGetter, bool) {
 	s := r.state.Load()
+	if s.ring == nil {
+		return nil, false
+	}
 	id := s.ring.Get(key)
 	if id == "" || id == r.selfID {
 		return nil, false

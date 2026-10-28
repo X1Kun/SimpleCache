@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # Automatic runs are temporarily paused during architecture development.
   workflow_dispatch:
 
 permissions:

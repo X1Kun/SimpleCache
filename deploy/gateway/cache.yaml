@@ -1,0 +1,19 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: cache.x1kun.com/v1
+kind: SimpleCache
+metadata:
+  name: products
+spec:
+  image: simplecache-engine:gateway
+  size: 3
+  sourceSecret: products
+  ttlSeconds: 60
+  gateway:
+    className: eg
+    replicas: 2
