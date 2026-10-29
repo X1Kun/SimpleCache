@@ -19,3 +19,7 @@ geecache-server
 /docs/REFACTOR_STATE.md
 /docs/VALIDATION.md
 /docs/legacy/
+
+# Local Python validation imports.
+__pycache__/
+*.pyc
