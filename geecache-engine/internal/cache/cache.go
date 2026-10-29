@@ -56,13 +56,16 @@ func (c *cache) add(key string, value ByteView, ttl time.Duration) ByteView {
 // Stats describes local logical storage; expiry may be removed on lookup or by
 // bounded maintenance. Entries can include expiry not reached by either yet.
 type Stats struct {
-	Bytes       int64  `json:"logical_bytes"`
-	Capacity    int64  `json:"capacity_bytes"`
-	Entries     int    `json:"entries"`
-	Removals    uint64 `json:"removals"`
-	HotBytes    int64  `json:"hot_bytes"`
-	HotCapacity int64  `json:"hot_capacity_bytes"`
-	HotEntries  int    `json:"hot_entries"`
+	VersionRecords   int    `json:"version_records"`
+	VersionCapacity  int    `json:"version_capacity"`
+	VersionEvictions uint64 `json:"version_evictions"`
+	Bytes            int64  `json:"logical_bytes"`
+	Capacity         int64  `json:"capacity_bytes"`
+	Entries          int    `json:"entries"`
+	Removals         uint64 `json:"removals"`
+	HotBytes         int64  `json:"hot_bytes"`
+	HotCapacity      int64  `json:"hot_capacity_bytes"`
+	HotEntries       int    `json:"hot_entries"`
 }
 
 func (c *cache) stats() Stats {
@@ -87,4 +90,16 @@ func (c *cache) get(key string) (ByteView, bool) {
 		return value.(ByteView), true
 	}
 	return ByteView{}, false
+}
+
+// version observes a resident value without touching its recency or deadline.
+func (c *cache) version(key string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lru != nil {
+		if v, ok := c.lru.Peek(key); ok {
+			return v.(ByteView).Version()
+		}
+	}
+	return 0
 }

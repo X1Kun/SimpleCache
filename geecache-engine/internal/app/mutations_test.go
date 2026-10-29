@@ -115,18 +115,27 @@ func productCluster(t *testing.T, store MutableSource) []productNode {
 
 func productClusterWithHotBudget(t *testing.T, store MutableSource, hotBytes int64) []productNode {
 	t.Helper()
+	return productClusterWithRouting(t, store, hotBytes, false)
+}
+func productClusterWithRouting(t *testing.T, store MutableSource, hotBytes int64, direct bool) []productNode {
+	t.Helper()
 	const token = "test-token"
 	var nodes []productNode
 	var members []peer.Member
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("node-%d", i)
-		router := peer.NewRouterWithToken(id, time.Second, token)
+		var router *peer.Router
+		if direct {
+			router = peer.NewDirectory(id, time.Second, token)
+		} else {
+			router = peer.NewRouterWithToken(id, time.Second, token)
+		}
 		t.Cleanup(router.Close)
 		group := cache.NewGroup("products", 1<<20, store, cache.Options{Peers: router, HotCacheBytes: hotBytes})
 		server := httptest.NewServer(peer.NewHandlerWithToken(token, group))
 		t.Cleanup(server.Close)
 		members = append(members, peer.Member{ID: id, Address: strings.TrimPrefix(server.URL, "http://")})
-		api := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: store, Router: router, Token: token})
+		api := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: store, Router: router, Token: token, DirectReads: direct})
 		nodes = append(nodes, productNode{group, router, api})
 	}
 	for _, node := range nodes {

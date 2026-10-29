@@ -18,6 +18,8 @@ var (
 	ErrInvalidKey         = errors.New("key must contain 1 to 256 bytes")
 	ErrValueTooLarge      = errors.New("value exceeds 1MiB")
 	ErrPreconditionFailed = errors.New("source version precondition failed")
+	ErrInvalidVersion     = errors.New("invalid source invalidation version")
+	ErrStaleVersion       = errors.New("value is older than an observed source version")
 	ErrOverloaded         = errors.New("cache admission capacity exhausted")
 )
 
@@ -91,6 +93,7 @@ type Group struct {
 	bloom        *BloomFilter
 	routeFlight  singleflight.Group
 	originFlight singleflight.Group
+	floors       versionFloors
 	// Fixed stripes bound metadata memory without fencing every unrelated key.
 	// Hash collisions conservatively fence other in-flight loads in that stripe.
 	epochMu       sync.Mutex
@@ -150,6 +153,7 @@ func NewGroup(name string, capacity int64, getter Getter, opts Options) *Group {
 		panic("invalid admission or cleanup options")
 	}
 	g := &Group{name: name, getter: getter, mainCache: cache{cacheBytes: capacity - opts.HotCacheBytes}, hotCache: cache{cacheBytes: opts.HotCacheBytes}, opts: opts}
+	g.floors.capacity = DefaultVersionRecords
 	g.apiWaiters = make(chan struct{}, opts.MaxMissWaiters)
 	g.peerWaiters = make(chan struct{}, opts.MaxMissWaiters)
 	g.routeTasks = make(chan struct{}, opts.MaxMissWaiters)
@@ -171,6 +175,11 @@ func (g *Group) Stats() Stats {
 		s.Removals += h.Removals
 		s.HotBytes, s.HotCapacity, s.HotEntries = h.Bytes, h.Capacity, h.Entries
 	}
+	g.epochMu.Lock()
+	s.VersionRecords = len(g.floors.entries)
+	s.VersionCapacity = g.floors.capacity
+	s.VersionEvictions = g.floors.evictions
+	g.epochMu.Unlock()
 	return s
 }
 
@@ -188,6 +197,8 @@ func Result(err error) string {
 		return "not_found"
 	case errors.Is(err, ErrOverloaded):
 		return "overloaded"
+	case errors.Is(err, ErrStaleVersion):
+		return "stale_version"
 	case errors.Is(err, ErrPreconditionFailed):
 		return "precondition_failed"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
@@ -220,6 +231,21 @@ func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) 
 	return ByteView{}, false, nil
 }
 
+// A caller retains its observed floor even if bounded metadata is retired while
+// it waits. A weaker flight/cache hit cannot satisfy that caller's value read.
+func (g *Group) lookupAtLeast(ctx context.Context, key string, minimum int64) (ByteView, bool, error) {
+	value, hit, err := g.lookup(ctx, key)
+	if hit && value.Version() < minimum {
+		return ByteView{}, false, nil
+	}
+	return value, hit, err
+}
+func (g *Group) readBarrier(key string) (uint64, int64) {
+	g.epochMu.Lock()
+	defer g.epochMu.Unlock()
+	return g.epochs[g.epochBucket(key)], g.knownVersionLocked(key)
+}
+
 func await(ctx context.Context, result <-chan singleflight.Result) (ByteView, error) {
 	select {
 	case <-ctx.Done():
@@ -250,11 +276,11 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 		return ByteView{}, ErrOverloaded
 	}
 	defer func() { <-g.apiWaiters }()
-	epoch := g.currentEpoch(key)
-	result := g.routeFlight.DoChan(flightKey(epoch, key), func() (any, error) {
+	epoch, minimum := g.readBarrier(key)
+	result := g.routeFlight.DoChan(flightKey(epoch, minimum, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.RouteTimeout)
 		defer cancel()
-		if v, hit, err := g.lookup(work, key); hit || err != nil {
+		if v, hit, err := g.lookupAtLeast(work, key, minimum); hit || err != nil {
 			return v, err
 		}
 		// Shared routing outlives canceled callers, so it needs its own bound.
@@ -279,11 +305,13 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 						err = ErrValueTooLarge
 					} else {
 						view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt, version: value.Version}
-						g.populateHot(key, view, epoch)
-						return view, nil
+						err = g.acceptPeer(key, view, epoch, minimum)
+						if err == nil {
+							return view, nil
+						}
 					}
 				}
-				if errors.Is(err, ErrNotFound) {
+				if errors.Is(err, ErrNotFound) && max(minimum, g.knownVersion(key)) == 0 {
 					return ByteView{}, err
 				}
 				if errors.Is(err, ErrOverloaded) {
@@ -300,24 +328,24 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 				// Transport, protocol and unknown-group failures fall back to the local source.
 			}
 		}
-		return g.getLocal(work, key, "")
+		return g.getLocal(work, key, "", minimum)
 	})
 	return await(ctx, result)
 }
 
 // GetLocal never selects a peer. Source work has its own bounded lifecycle.
 func (g *Group) GetLocal(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, "peer")
+	return g.getLocal(ctx, key, "peer", 0)
 }
 
 // GetDirect is the public Gateway-mode read path: API admission and source
 // coalescing, with neither routeFlight nor an outgoing Peer request.
 func (g *Group) GetDirect(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, "api")
+	return g.getLocal(ctx, key, "api", 0)
 }
 
-func (g *Group) getLocal(ctx context.Context, key string, lookupKind string) (ByteView, error) {
-	v, hit, err := g.lookup(ctx, key)
+func (g *Group) getLocal(ctx context.Context, key string, lookupKind string, required int64) (ByteView, error) {
+	v, hit, err := g.lookupAtLeast(ctx, key, required)
 	if lookupKind != "" {
 		result := "miss"
 		if hit {
@@ -338,11 +366,12 @@ func (g *Group) getLocal(ctx context.Context, key string, lookupKind string) (By
 		}
 		defer func() { <-lane }()
 	}
-	epoch := g.currentEpoch(key)
-	result := g.originFlight.DoChan(flightKey(epoch, key), func() (any, error) {
+	epoch, minimum := g.readBarrier(key)
+	minimum = max(minimum, required)
+	result := g.originFlight.DoChan(flightKey(epoch, minimum, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.SourceTimeout)
 		defer cancel()
-		if v, hit, err := g.lookup(work, key); hit || err != nil {
+		if v, hit, err := g.lookupAtLeast(work, key, minimum); hit || err != nil {
 			return v, err
 		}
 		waitStart := time.Now()
@@ -399,7 +428,8 @@ func (g *Group) getLocal(ctx context.Context, key string, lookupKind string) (By
 		// Check and insert under the same lock as invalidation. A pre-invalidation
 		// reader may finish with its old value, but cannot repopulate the cache.
 		g.epochMu.Lock()
-		valid := epoch == g.epochs[g.epochBucket(key)]
+		stale := version < max(minimum, g.knownVersionLocked(key))
+		valid := epoch == g.epochs[g.epochBucket(key)] && !stale
 		if valid {
 			view = g.mainCache.add(key, view, g.opts.TTL)
 			if g.opts.HotCacheBytes > 0 {
@@ -407,6 +437,11 @@ func (g *Group) getLocal(ctx context.Context, key string, lookupKind string) (By
 			}
 		}
 		g.epochMu.Unlock()
+		if stale {
+			g.observe("version_rejected", "source", 0)
+			g.observe("discard_source", "source_version", 0)
+			return ByteView{}, ErrStaleVersion
+		}
 		if !valid {
 			g.observe("discard_source", "epoch_changed", 0)
 		}
@@ -425,33 +460,31 @@ func ValidateKey(key string) error {
 // Invalidate removes a local copy and separates subsequent callers from both
 // old routing and old source flights. It never changes the source or forwards.
 func (g *Group) Invalidate(key string) error {
-	if err := ValidateKey(key); err != nil {
-		return err
-	}
-	g.epochMu.Lock()
-	g.epochs[g.epochBucket(key)]++
-	g.mainCache.remove(key)
-	if g.opts.HotCacheBytes > 0 {
-		g.hotCache.remove(key)
-	}
-	g.epochMu.Unlock()
-	g.observe("invalidate", "ok", 0)
-	return nil
+	return g.InvalidateVersion(key, 0)
 }
 
-func (g *Group) populateHot(key string, value ByteView, epoch uint64) {
-	if g.opts.HotCacheBytes == 0 || value.RemainingTTL() <= 0 || int64(len(key)+value.Len()) > g.opts.HotCacheBytes {
-		return
-	}
+// acceptPeer validates known source versions even when hot caching is disabled.
+// Unknown/older Peer data falls back to the primary source through Get.
+func (g *Group) acceptPeer(key string, value ByteView, epoch uint64, minimum int64) error {
 	g.epochMu.Lock()
+	if value.Version() < max(minimum, g.knownVersionLocked(key)) {
+		g.epochMu.Unlock()
+		g.observe("version_rejected", "peer", 0)
+		return ErrStaleVersion
+	}
+	eligible := g.opts.HotCacheBytes > 0 && value.RemainingTTL() > 0 && int64(len(key)+value.Len()) <= g.opts.HotCacheBytes
 	valid := epoch == g.epochs[g.epochBucket(key)]
-	if valid {
+	if eligible && valid {
+		if value.Version() > g.mainCache.version(key) {
+			g.mainCache.remove(key)
+		}
 		g.hotCache.add(key, value, g.opts.HotTTL)
 	}
 	g.epochMu.Unlock()
-	if !valid {
+	if eligible && !valid {
 		g.observe("discard_hot", "epoch_changed", 0)
 	}
+	return nil
 }
 
 func (g *Group) currentEpoch(key string) uint64 {
@@ -469,6 +502,6 @@ func (g *Group) epochBucket(key string) uint64 {
 	return hash & uint64(g.opts.EpochBuckets-1)
 }
 
-func flightKey(epoch uint64, key string) string {
-	return strconv.FormatUint(epoch, 10) + ":" + key
+func flightKey(epoch uint64, minimum int64, key string) string {
+	return strconv.FormatUint(epoch, 10) + ":" + strconv.FormatInt(minimum, 10) + ":" + key
 }

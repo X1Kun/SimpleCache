@@ -90,6 +90,7 @@ func TestWriteAndBroadcastTimingsDescribeSeparatePhases(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
+		w.Header().Set(peer.InvalidationVersionHeader, r.Header.Get(peer.InvalidationVersionHeader))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()

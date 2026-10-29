@@ -1,10 +1,10 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-10-28. Main ea46985 contains source versions,
-conditional writes, bounded admission, timing metrics and active expiration.
-This working tree adds opt-in Envoy Gateway key routing and Operator integration.
-Version-bearing/durable invalidation remains future work; historical measurements
-below refer to their original Peer-routing binaries.
+Documentation updated 2026-10-29. Main 3214100 contains Gateway routing,
+conditional writes, bounded admission and active expiration. This working tree
+adds committed-version invalidation, bounded version floors and replay/late-fill
+checks. Durable notification delivery remains optional future work. Historical
+measurements below refer to their original binaries.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -28,7 +28,7 @@ available for isolated cache and platform diagnostics.
 | Authority | PostgreSQL owns values and per-key increasing versions | Keep PostgreSQL authoritative |
 | Reads | Opt-in Gateway -> local cache/source; legacy Peer routing remains the default | Establish real-chain performance after invalidation semantics |
 | Writes | Authenticated create/update/delete with atomic source-version checks | Business services add their own predicates/transactions as needed |
-| Invalidation | Key-only best-effort HTTP fan-out, 256 local epoch stripes | Version-bearing events plus existing local fill fencing |
+| Invalidation | Version-bearing best-effort HTTP fan-out, bounded floors and 256 epoch stripes | Durable delivery/catch-up only if required |
 | Expiration | Lookup-time checks plus bounded lifecycle-owned cleanup | Evaluate reclamation behavior under larger working sets |
 | Protection | Bounded API/Peer miss waiters, shared routes, source queue and writes | Validate budgets against real container memory and workloads |
 | Replication | Disposable hot copies, no replicated shard groups | Start without cache replication; add only for measured recovery needs |
@@ -150,14 +150,41 @@ Values are copied on admission and ByteSlice still returns a defensive copy.
 API success uses WriteTo under the io.Writer contract, removing one extra slice
 copy. This does not mean zero-copy networking or an allocation-free HTTP request.
 
-Each Group has 256 fixed FNV-1a epoch stripes, about 2KiB of counters. Local
-invalidation increments one stripe and removes that key from main/hot while
-holding the same epoch mutex used for fill validation. Both flight identities
-contain the epoch and key; old source/Peer results cannot refill after the local
-fence. Earlier callers may still receive earlier results. Stripe collisions
-conservatively reject another key's active fill without evicting unrelated
-cached values. This narrows invalidation scope; it does not shard the epoch lock.
-A single-stripe diagnostic option reproduces the historical global epoch.
+Each Group has 256 fixed FNV-1a epoch stripes. Force invalidation always
+advances a stripe; a versioned notification advances it when announcing a
+version beyond the key's already known floor/resident version. Epoch and source
+version are separate: epochs detach local work, while source versions compare
+values belonging to the same key. Source/route flight identities include epoch,
+minimum observed version and key. A new caller need not join older/weaker work.
+Fill admission shares epochMu with notification processing, preventing old work
+from refilling after an observed fence. Collisions conservatively reject another
+key's in-flight fill but do not evict its unrelated resident value.
+
+Version floors live independently of cached values, so value eviction or TTL
+expiration does not immediately forget a delivered notification. Each Group
+retains at most **1,024** records. Keys are cloned (at most 256 bytes each),
+avoiding retention of a large request URI through a substring. Records are
+retired in order of last version advancement; reads and duplicate/older events
+do not refresh that order. This metadata is additional to CACHE_BYTES, not an
+RSS quota or a durable record of every key's maximum version.
+
+Retiring a floor advances its stripe again, fencing work that started before
+retirement. Active flights also retain their captured minimum as a scalar, even
+if the shared record is evicted. Peer fallback inherits that minimum and cannot
+join a weaker source flight or use a lower-version cache hit. Successful source
+results below the captured/current known version are rejected with HTTP 503;
+older/unversioned Peer values fall back to the primary source, even with hot
+caching disabled. An unversioned Peer 404 also falls back when a version floor
+is known. Source absence is not cached and carries no tombstone-version read
+promise; this does not introduce a public minimum-version/linearizable-read API.
+
+Once a floor is retired and active work ends, new callers can no longer rely on
+that forgotten per-key history. They use resident versions, the authoritative
+primary source, existing Peer/TTL rules and future notifications. A restarted
+node loses both cache and floors and starts cold; a missed notification is not
+replayed automatically. Retention pressure, reconnects and unseen writes still
+allow old reads under the existing weak consistency contract. The single-stripe
+diagnostic option remains available for historical comparisons.
 
 Bloom is initialized from a complete immutable key set only. The demo has Tom,
 Jack, Sam and Auto-0 through Auto-9999, with 100ms simulated source latency.
@@ -235,7 +262,7 @@ PostgreSQL connectivity/schema are checked at startup, not on every probe.
 | GET /api?key=... | Local/Peer/source read |
 | PUT /api?key=... | Validate JSON, conditional create/update, then invalidate |
 | DELETE /api?key=... | Conditional logical deletion retaining its generation, then invalidate |
-| POST /invalidate?key=... | Cache invalidation only, also used after external writes |
+| POST /invalidate?key=... | Cache invalidation only; optional committed-version header after external writes |
 | Peer DELETE /_geecache/products/... | Authenticated local invalidation, no rebroadcast |
 
 Keys are 1-256 bytes; values are at most 1MiB, encoded Peer bodies at most
@@ -271,18 +298,43 @@ Workload JSON versions are content checks, distinct from the source version colu
 No task idempotency or minimum-version read API is introduced here.
 
 A lifecycle-owned 3s write task gives the source 800ms and broadcast 1s. Caller
-disconnect does not cancel post-commit invalidation. Broadcast always invalidates
-the initiating node, then uses at most eight workers against one known-member
-snapshot. Peer handlers invalidate locally only. Ambiguous database errors also
-trigger an invalidation attempt.
+disconnect does not cancel post-commit invalidation. Successful writes broadcast
+the actual SQL RETURNING version. The initiating node applies the same rule as
+remote nodes, using at most eight workers against one known-member snapshot.
+Unknown/older cached values are removed; an equal/newer value keeps its payload,
+recency and original expiry. Duplicate/older events do not detach a current flight
+or lower retained versions. Peer handlers apply notifications locally only.
+Ambiguous source errors still trigger force invalidation without inventing a
+committed version; a source adapter returning a nonpositive successful version
+is treated as an unknown outcome, not a successful versioned commit.
 
 - HTTP 200 with source_committed=true means all targets in this attempt
-  acknowledged, not that every possible reader is synchronized.
+  acknowledged the announced version, not that every possible reader is synchronized.
 - HTTP 202 with source_committed=true means incomplete fan-out; failed/time-out
   targets are reported, the source is not rolled back, and no retry is scheduled.
+  A peer returning 204 without the matching version acknowledgement is marked
+  unversioned and also produces 202 for a versioned broadcast.
 - HTTP 412 is a known failed condition and performs no mutation or broadcast.
 - Source errors return 503/504 and source_committed=null: commit status can be
   unknown. Verify the outcome before repeating the business mutation.
+
+The optional request/acknowledgement header is
+`X-SimpleCache-Invalidation-Version: N` (one canonical positive int64).
+Explicit zero, negative/overflow values, leading zeros, lists and duplicate
+headers fail with 400 before cache mutation. New Peer handlers echo the requested
+version after processing it, including an event ignored because a newer value
+already exists; this is a processing acknowledgement, not the current cached
+version or a durable watermark. The JSON invalidation report includes `version`.
+Only POST /invalidate accepts this header from API clients; PUT/DELETE derive the
+version from the database and reject client attempts to supply it.
+
+An absent header retains force invalidation for legacy senders, manual cache
+clearing and unknown commits. Force clearing preserves the highest already known
+version; it does not assert a new source generation. New senders distinguish a
+legacy 204 without a version echo from a modern acknowledgement. Mixed clusters
+therefore remain usable while explicitly reporting the weaker delivery outcome.
+External writers must announce the version returned by their own committed SQL,
+not an application counter, wall-clock timestamp or client-provided guess.
 
 Epoch fencing is local. In-flight distributed reads, omitted/offline nodes and
 crashes between commit and notification can expose old values. TTL is a fallback,
@@ -314,8 +366,9 @@ flowchart TD
 
 The event path is produced by application code after commit; the current
 PostgreSQL adapter does not automatically publish it. The Gateway read path is now implemented as an opt-in deployment;
-versioned invalidation in this diagram remains a target; source versions alone do not add
-a durable event relay or source-version floor at every cache node.
+versioned invalidation is now implemented with bounded local floors. It still
+has no durable event relay, global reader barrier or guaranteed retained floor
+at every possible holder.
 
 ### Routing and shard boundaries
 
@@ -390,13 +443,12 @@ preserve unknown-commit handling. Business stock
 or task operations belong to their service's atomic predicates/transactions and
 idempotency rules, rather than trusting cached state as authorization to mutate.
 
-Cache entries now contain value, source version and expiry. Invalidation still
-carries only the key; carrying the new version is a follow-up. The future event
-consumer must not move known state backwards and needs a version floor in
-addition to local epoch fencing.
-A floor cannot vanish with the value while old work still requires it; define
-bounded metadata, eviction, reconnect and recovery behavior. Version comparison
-cannot reveal an unseen database update, so delivery and TTL remain necessary.
+Cache entries contain value, source version and expiry. Notifications now carry
+the committed version, with bounded per-key floors and local epoch fencing as
+described above. Deletion/recreation uses the same monotonic source sequence;
+a delayed deletion cannot remove a resident recreated value with a newer version.
+Version comparison cannot reveal an unseen database update or recover forgotten
+history, so delivery and TTL remain necessary.
 
 An optional minimum-version read may bypass old cache state and load the primary
 when a caller requires its completed write's version. It is not a global-latest
@@ -547,6 +599,18 @@ curl -i 'http://127.0.0.1:19999/api?key=product:42'
 
 Quiescent reads after successful deletion/invalidation return 404. POST can also
 notify after an external database update; it does not modify the row itself.
+For a versioned external write, use its actual SQL RETURNING version, for example:
+
+```bash
+# Set this to the generation returned by the completed external transaction.
+COMMITTED_VERSION=3
+curl -i -X POST 'http://127.0.0.1:19999/invalidate?key=product:42' \
+  -H 'Authorization: Bearer learning-only-token' \
+  -H "X-SimpleCache-Invalidation-Version: $COMMITTED_VERSION"
+```
+
+A lower replay leaves an equal/newer cached value in place. Without the header,
+POST force-clears known copies while preserving their retained version floors.
 Compose down retains the database volume; add --volumes only to erase that data.
 For an existing dedicated database, apply the schema/seed explicitly:
 
@@ -685,7 +749,7 @@ For real database integration, first apply schema.sql to a dedicated test DB:
 ```bash
 cd geecache-engine
 SIMPLECACHE_TEST_DATABASE_URL='postgres://.../dedicated_test_db?sslmode=disable' \
-  go test -race -count=1 -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle)$' \
+  go test -race -count=1 -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle|VersionedInvalidation)$' \
   -v ./internal/source/postgres ./internal/app
 ```
 
@@ -886,7 +950,31 @@ This is a single-host functional check using port-forwards to each proxy, with
 temporary control-plane etcd on tmpfs and the same digest-verified Envoy image
 retagged for offline loading. It does not establish production latency,
 throughput, multi-host availability, control-plane durability or linearizable
-cache reads. Source-version-bearing invalidation remains the next functional step.
+cache reads. Version-bearing notification semantics are added by the current working tree; this historical Gateway run predates them.
+
+### Versioned invalidation verification
+
+The [2026-10-29 verification](../bin/reports/20261029T021129Z-versioned-invalidation-da5c18bd/verification.json)
+passed full engine race/vet and five real-PostgreSQL integration tests, including
+a new three-node HTTP direct-read lifecycle. Updates announce their SQL versions;
+old/duplicate notifications produce no additional Getter reads; deletion and
+recreation keep increasing versions, and a late deletion preserves the recreated
+cached value. An independent pool verifies the final source tuple.
+
+Controlled tests also cover notifications racing blocked source work, repeated
+events during a current fill, floor capacity/retirement, inheritance of a captured
+floor across fallback, and avoidance of weaker cache hits/flights. They check
+unversioned/old Peer replies with hot caching both disabled and enabled,
+strict request/acknowledgement parsing, mixed-version 202 responses, unknown
+commits and bounded metric labels. Key-copy tests prevent version metadata from
+retaining oversized request strings through small key slices.
+
+The temporary PostgreSQL test data directory used tmpfs to avoid initialization
+fsync stalls on this host. It validates real SQL/transaction and notification
+semantics, not physical-disk durability, performance or database crash recovery.
+The owned Compose project and volume were removed. Gateway replay scenarios were
+added to make gateway-smoke, but the full Kubernetes smoke was not rerun in this
+commit; the preceding Gateway result above remains separate historical evidence.
 
 ### Diagnosis, metrics and CI
 
@@ -901,6 +989,15 @@ Conflicts have precondition_failed results and do not increment
 simplecache_source_unknown_commits_total; transport/timeout source failures retain
 the unknown-commit contract. simplecache_write_requests_inflight spans admitted
 body/source/fan-out work.
+
+Version metrics expose applied/ignored notifications through
+simplecache_version_invalidations_total{result}, rejected values through
+simplecache_version_rejections_total{kind=source|peer}, and retained floor
+entries/capacity/retirements through simplecache_version_records,
+simplecache_version_record_capacity and simplecache_version_record_evictions_total.
+Labels never contain keys, versions, URLs or error text. Source-load counters
+still describe Getter execution outcomes; version admission rejection is counted
+separately from the database read result.
 
 Admission gauges expose API/Peer miss waiters, shared route tasks and pending
 source tasks. simplecache_admission_rejections_total has bounded kind labels
@@ -946,22 +1043,20 @@ and builds without publishing. CI does not run Kind or the heavy manual investig
 ## Delivery plan
 
 Priority remains functionality first, real-chain performance afterward.
-Runtime protection and conditional writes are merged. This stage implements the
-Gateway read path, multi-proxy configuration, stable shard addressing and Operator
-integration, retaining the legacy mode for existing workflows.
+Gateway routing, conditional writes and runtime protection are merged. This
+commit adds source-version-bearing notifications, bounded retention, stale-result
+rejection and explicit acknowledgement of version semantics.
 
 | Stage | Work | Acceptance |
 | --- | --- | --- |
-| This stage | Envoy Gateway and Operator integration | Canonical-key affinity across two actual proxies; no routine Peer read; stable identity after Pod replacement; scale up/down and conditional-write smoke |
-| Next | Version-bearing invalidation with bounded metadata | Old/duplicate events do not move known versions backwards; define late-fill, deletion/recreation and metadata eviction/reconnect behavior |
-| Combined semantics check | PostgreSQL + Gateway + cache Pods | Exercise versioned events and conditional writes across route/health changes, explicitly allowing a stale-read window |
-| After functionality | Real-chain experiments | Measure end-to-end and component latency, multiple TTL cycles, sustained read/write, invalidation ordering and fault/recovery under equal declared budgets |
+| This commit | Versioned invalidation and bounded floors | Old/duplicate events preserve current data and flights; late old values cannot refill; deletion/recreation, floor retirement, legacy peers and unknown commits have defined behavior |
+| Combined semantics check | PostgreSQL + Gateway + cache Pods | Replay old/duplicate notifications through each proxy, check known-holder acknowledgements and unchanged source work for retained current values |
+| After functionality | Real-chain experiments | Measure end-to-end/component latency, multiple TTL cycles, sustained reads/writes, notification ordering and fault/recovery under equal declared budgets |
 | Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 
-Keep the existing local/Peer experiment evidence. Do not treat the functional
-Gateway smoke or its observed key movement as a production SLO, benchmark or
-linearizability proof. Source-version-bearing invalidation is the next functional
-commit; Outbox/CDC and cache replication are separate decisions.
+Keep the existing local/Peer evidence and functional Gateway smoke separate from
+new performance conclusions. Outbox/CDC and cache replication remain independent
+decisions; version metadata is bounded, volatile and does not detect unseen writes.
 
 Start without cache replica groups; PostgreSQL remains authoritative. Strong
 cache consensus, Sidecar/DaemonSet deployment and HPA are not first-stage

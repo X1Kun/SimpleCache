@@ -59,6 +59,15 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	version, versionErr := peer.ParseInvalidationVersion(r.Header)
+	if versionErr != nil {
+		http.Error(w, versionErr.Error(), http.StatusBadRequest)
+		return
+	}
+	if !invalidateOnly && version != 0 {
+		http.Error(w, "invalidation version is only accepted on POST /invalidate", http.StatusBadRequest)
+		return
+	}
 	// Keep body buffering and fan-out bounded independently of read misses.
 	select {
 	case opts.writeSlots <- struct{}{}:
@@ -129,6 +138,9 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 			version, writeErr = opts.Store.DeleteIfVersion(source, key, expected)
 		}
 		stop()
+		if writeErr == nil && version <= 0 {
+			writeErr = errors.New("source returned an invalid committed version")
+		}
 		if writeErr == nil {
 			committed := true
 			response.SourceCommitted = &committed
@@ -151,7 +163,10 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	}
 	// Even an error can mean an ambiguous commit. Attempt invalidation then too.
 	broadcastStart := time.Now()
-	report, err := opts.Router.Invalidate(work, group, key)
+	if response.SourceVersion != nil {
+		version = *response.SourceVersion
+	}
+	report, err := opts.Router.InvalidateVersion(work, group, key, version)
 	if err != nil {
 		if metrics != nil {
 			metrics.Observe("broadcast", "error", time.Since(broadcastStart))

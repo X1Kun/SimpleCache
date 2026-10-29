@@ -68,9 +68,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		if err := g.Invalidate(key); err != nil {
+		version, err := ParseInvalidationVersion(r.Header)
+		if err == nil {
+			err = g.InvalidateVersion(key, version)
+		}
+		if err != nil {
 			http.Error(w, err.Error(), Status(err))
 			return
+		}
+		if version > 0 {
+			w.Header().Set(InvalidationVersionHeader, strconv.FormatInt(version, 10))
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -79,6 +86,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, cache.ErrNotFound) {
 			w.Header().Set(ErrorHeader, "KEY_NOT_FOUND")
+		}
+		if errors.Is(err, cache.ErrStaleVersion) {
+			w.Header().Set(ErrorHeader, "STALE_VERSION")
 		}
 		if errors.Is(err, cache.ErrOverloaded) {
 			w.Header().Set(ErrorHeader, "OVERLOADED")

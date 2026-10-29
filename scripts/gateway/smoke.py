@@ -124,11 +124,13 @@ def forward(namespace, resource, remote):
         log.close()
 
 
-def request(base, key, method='GET', value=None, etag=None, create=False, raw=None):
+def request(base, key, method='GET', value=None, etag=None, create=False, raw=None, path='/api', event_version=None):
     query = raw if raw is not None else urllib.parse.urlencode({'key': key}, quote_via=urllib.parse.quote, safe='')
     headers = {}
     if method != 'GET':
         headers['Authorization'] = 'Bearer ' + TOKEN
+    if event_version is not None:
+        headers['X-SimpleCache-Invalidation-Version'] = str(event_version)
     if etag:
         headers['If-Match'] = etag
     if create:
@@ -137,7 +139,7 @@ def request(base, key, method='GET', value=None, etag=None, create=False, raw=No
     if value is not None:
         data = json.dumps(value).encode()
         headers['Content-Type'] = 'application/json'
-    req = urllib.request.Request(base + '/api?' + query, data=data, headers=headers, method=method)
+    req = urllib.request.Request(base + path + '?' + query, data=data, headers=headers, method=method)
     try:
         response = urllib.request.urlopen(req, timeout=5)
     except urllib.error.HTTPError as exc:
@@ -350,13 +352,35 @@ nodes:
         key = keys[0]
         code, headers, _ = request(bases[0], key)
         assert code == 200
-        assert request(bases[1], key, 'PUT', 'new-value', etag=headers['etag'])[0] == 200
+        code, _, body = request(bases[1], key, 'PUT', 'new-value', etag=headers['etag'])
+        assert code == 200, (code, body)
+        updated = json.loads(body)
+        assert updated['source_version'] == updated['invalidation']['version'] == 2
+        assert len(updated['invalidation']['results']) == 3 and updated['invalidation']['complete']
         code, headers, body = request(bases[0], key)
         assert (code, headers['etag'], json.loads(body)) == (200, '"v2"', 'new-value'), (code, headers, body)
+        before_events = worker_metrics('before-version-replays')
+        for base, event in [(bases[0], 1), (bases[1], 2), (bases[0], 1)]:
+            status, _, result = request(base, key, 'POST', path='/invalidate', event_version=event)
+            assert status == 200, result
+            assert json.loads(result)['invalidation']['version'] == event
+            code, h, payload = request(base, key)
+            assert (code, h['etag'], json.loads(payload)) == (200, '"v2"', 'new-value')
+        assert worker_metrics('after-version-replays') == before_events
+        check('old and duplicate version events preserve the current cache', 'v1/v2 replays caused no additional source reads')
         assert request(bases[0], key, 'PUT', 'stale', etag='"v1"')[0] == 412
         assert request(bases[1], key, 'DELETE', etag='"v2"')[0] == 200
         assert request(bases[0], key)[0] == 404
         check('PostgreSQL conditional write and invalidation through gateway', 'v1 -> v2 -> tombstone, stale write 412')
+        status, _, body = request(bases[0], key, 'PUT', 'recreated', create=True)
+        assert status == 200 and json.loads(body)['source_version'] == 4, body
+        assert request(bases[1], key)[1]['etag'] == '"v4"'
+        before_delete_replay = worker_metrics('before-delete-replay')
+        assert request(bases[1], key, 'POST', path='/invalidate', event_version=3)[0] == 200
+        status, h, body = request(bases[0], key)
+        assert (status, h['etag'], json.loads(body)) == (200, '"v4"', 'recreated')
+        assert worker_metrics('after-delete-replay') == before_delete_replay
+        check('late deletion notification preserves a recreated value', 'v4 remained cached after replaying delete v3')
         remaining = keys[1:]
         before = {key: value for key, value in mapping.items() if key in remaining}
         owner = before[remaining[0]].split('/')[-1]
