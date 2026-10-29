@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Isolated functional checks of the real gateway chain; no performance claims."""
 import contextlib
+import base64
 import datetime
 import json
+import hashlib
+import sys
+import threading
 import os
 import pathlib
 import secrets
@@ -26,7 +30,12 @@ ENV = {**os.environ, 'KUBECONFIG': str(REPORT / 'kubeconfig')}
 TOKEN = secrets.token_urlsafe(24)
 PROXY_LOCAL = CLUSTER + ':envoy'
 LOCAL_PROXY_TAG_CREATED = False
-RESULTS = {'cluster': CLUSTER, 'gateway': GATEWAY, 'node': NODE, 'checks': []}
+EXTENDED = os.environ.get('GATEWAY_EXTENDED', '0') == '1'
+KEEP_FAILED = os.environ.get('GATEWAY_KEEP_FAILED', '0') == '1'
+RESULTS = {'cluster': CLUSTER, 'gateway': GATEWAY, 'node': NODE, 'checks': [], 'suite': 'extended' if EXTENDED else 'smoke', 'phase': 'setup'}
+TRACE_LOCK = threading.Lock()
+TRACE = (REPORT / 'requests.jsonl').open('w')
+STARTED = time.monotonic()
 CREATED = False
 LOG = (REPORT / 'commands.log').open('w+')
 
@@ -124,10 +133,10 @@ def forward(namespace, resource, remote):
         log.close()
 
 
-def request(base, key, method='GET', value=None, etag=None, create=False, raw=None, path='/api', event_version=None):
+def request(base, key, method='GET', value=None, etag=None, create=False, raw=None, path='/api', event_version=None, auth=True, extra_headers=None, raw_body=None):
     query = raw if raw is not None else urllib.parse.urlencode({'key': key}, quote_via=urllib.parse.quote, safe='')
     headers = {}
-    if method != 'GET':
+    if method != 'GET' and auth:
         headers['Authorization'] = 'Bearer ' + TOKEN
     if event_version is not None:
         headers['X-SimpleCache-Invalidation-Version'] = str(event_version)
@@ -139,17 +148,32 @@ def request(base, key, method='GET', value=None, etag=None, create=False, raw=No
     if value is not None:
         data = json.dumps(value).encode()
         headers['Content-Type'] = 'application/json'
+    if raw_body is not None:
+        data = raw_body.encode() if isinstance(raw_body, str) else raw_body
+        headers['Content-Type'] = 'application/json'
+    headers.update(extra_headers or {})
     req = urllib.request.Request(base + path + '?' + query, data=data, headers=headers, method=method)
+    started = time.monotonic()
     try:
         response = urllib.request.urlopen(req, timeout=5)
     except urllib.error.HTTPError as exc:
         response = exc
     with response:
-        return response.status, {k.lower(): v for k, v in response.headers.items()}, response.read().decode()
+        result = response.status, {k.lower(): v for k, v in response.headers.items()}, response.read().decode()
+    with TRACE_LOCK:
+        TRACE.write(json.dumps({'phase': RESULTS['phase'], 'method': method, 'key': key, 'status': result[0], 'etag': result[1].get('etag'), 'node': result[1].get('x-simplecache-node'), 'body_sha256': hashlib.sha256(result[2].encode()).hexdigest(), 'elapsed_seconds': time.monotonic()-started}, ensure_ascii=False) + '\n')
+        TRACE.flush()
+    return result
+
+
+def phase(name):
+    RESULTS['phase'] = name
+    (REPORT / 'result.json').write_text(json.dumps(RESULTS, indent=2))
+    print('PHASE:', name, flush=True)
 
 
 def check(name, detail):
-    RESULTS['checks'].append({'name': name, 'detail': detail})
+    RESULTS['checks'].append({'name': name, 'phase': RESULTS['phase'], 'run_report': str(REPORT), 'elapsed_seconds': time.monotonic()-STARTED, 'detail': detail})
     (REPORT / 'result.json').write_text(json.dumps(RESULTS, indent=2))
     print('PASS:', name, flush=True)
 
@@ -225,7 +249,7 @@ def snapshot(label):
             (REPORT / f'{label}-{kind}.json').write_text(k('get', kind, '-A', '-o', 'json'))
         except Exception as exc:
             LOG.write(f'Snapshot failed: {kind}: {exc}\n')
-    for ns, target in [('simplecache-operator-system', 'deployment/simplecache-operator-controller-manager'),
+    for ns, target in [('default', 'pod/postgres'), ('default', 'statefulset/products'), ('simplecache-operator-system', 'deployment/simplecache-operator-controller-manager'),
                        ('envoy-gateway-system', 'deployment/envoy-gateway')]:
         try:
             (REPORT / f'{label}-{ns}.log').write_text(k('-n', ns, 'logs', target, '--all-containers', '--tail=250'))
@@ -233,12 +257,86 @@ def snapshot(label):
             pass
 
 
+def continue_retained_experiment(previous_name):
+    global CLUSTER, PROXY_LOCAL, CREATED, LOCAL_PROXY_TAG_CREATED
+    previous_path = pathlib.Path(previous_name).resolve()
+    assert previous_path.is_relative_to((ROOT / 'bin/reports').resolve())
+    old = json.loads((previous_path / 'result.json').read_text())
+    assert old.get('status') == 'failed' and old.get('suite') == 'extended'
+    assert old.get('cleanup', {}).get('status') == 'retained-for-debug'
+    assert old['phase'] in ['database-connectivity-loss', 'restart-after-missed-notification', 'operator-child-repair', 'gateway-proxy-restart']
+    CLUSTER = old['cluster']
+    assert CLUSTER.startswith('simplecache-gateway-')
+    labels = json.loads(run(['docker', 'inspect', CLUSTER + '-control-plane', '--format={{json .Config.Labels}}']))
+    assert labels.get('io.x-k8s.kind.cluster') == CLUSTER and labels.get('io.x-k8s.kind.role') == 'control-plane'
+    run(['kind', 'export', 'kubeconfig', '--name', CLUSTER, '--kubeconfig', ENV['KUBECONFIG']])
+    old_crs = json.loads((previous_path / 'failure-simplecaches.json').read_text())['items']
+    old_cr = next(c for c in old_crs if c['metadata']['name'] == 'products' and c['metadata']['namespace'] == 'default')
+    current = obj('simplecache', 'products')
+    assert current['metadata']['uid'] == old_cr['metadata']['uid'], 'cache ownership changed'
+    old_pods = json.loads((previous_path / 'failure-pods.json').read_text())['items']
+    old_db = next(p for p in old_pods if p['metadata']['name'] == 'postgres' and p['metadata']['namespace'] == 'default')
+    assert obj('pod', 'postgres')['metadata']['uid'] == old_db['metadata']['uid'], 'database fixture changed'
+    assert current['spec']['size'] == 3 and current['spec']['ttlSeconds'] == 20
+    assert obj('service', 'postgres')['spec']['selector'] == {'app': 'postgres'}, 'database fault was not restored'
+    # Read only the token created by this exact fixture; never send it to logs.
+    secret_raw = subprocess.check_output(['kubectl', '--context', 'kind-' + CLUSTER, '-n', 'default', 'get', 'secret', 'products', '-o', 'json'], env=ENV, text=True, timeout=30)
+    globals()['TOKEN'] = base64.b64decode(json.loads(secret_raw)['data']['CACHE_ADMIN_TOKEN']).decode()
+    CREATED = True
+    PROXY_LOCAL = CLUSTER + ':envoy'
+    run(['docker', 'image', 'inspect', '--format={{.Id}}', PROXY_LOCAL])
+    LOCAL_PROXY_TAG_CREATED = True
+    RESULTS.update({'cluster': CLUSTER, 'continued_from': str(previous_path), 'images': old['images'],
+                    'postgres_storage': old.get('postgres_storage'), 'phase': old['phase'],
+                    'checks': [dict(c, run_report=c.get('run_report', str(previous_path))) for c in old['checks']]})
+    pods = [p for p in obj('pods', namespace='envoy-gateway-system', selector='gateway.envoyproxy.io/owning-gateway-name=products,gateway.envoyproxy.io/owning-gateway-namespace=default')['items'] if not p['metadata'].get('deletionTimestamp')]
+    assert len(pods) == 2
+    assert all(any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', [])) for p in pods)
+    remaining = ['item-' + str(i) for i in range(1, 48)] + ['商品:a b+c/d?&']
+    with contextlib.ExitStack() as stack:
+        bases = [stack.enter_context(forward('envoy-gateway-system', 'pod/' + p['metadata']['name'], 10080)) for p in pods]
+        admins = [stack.enter_context(forward('envoy-gateway-system', 'pod/' + p['metadata']['name'], 19000)) for p in pods]
+        addresses = {obj('service', f'products-shard-{i}')['spec']['clusterIP'] for i in range(3)}
+        wait_for('retained fixture health converged', lambda: proxies_healthy(admins, addresses), 90)
+        from scenarios import continue_exercise
+        continue_exercise(sys.modules[__name__], stack, bases, admins, remaining, [p['metadata']['uid'] for p in pods], old['phase'])
+        phase('final-validation')
+        worker_metrics('final')
+        check('gateway reads do not perform Peer forwarding', 'per-worker metrics captured')
+    assert len(RESULTS['checks']) == 26, 'scenario coverage incomplete'
+    snapshot('success')
+    RESULTS['status'] = 'passed'
+
+
 def main():
-    global CREATED, LOCAL_PROXY_TAG_CREATED
+    global CREATED, LOCAL_PROXY_TAG_CREATED, CLUSTER, PROXY_LOCAL
     print('Report:', REPORT, flush=True)
+    continuation = os.environ.get('GATEWAY_CONTINUE_REPORT')
+    if continuation:
+        assert EXTENDED
+        return continue_retained_experiment(continuation)
     run(['bash', 'scripts/gateway/fetch.sh', '--kind'])
-    # Refuse reuse even in the extraordinarily unlikely event of a name collision.
-    assert CLUSTER not in run(['kind', 'get', 'clusters']).split()
+    resume = os.environ.get('GATEWAY_RESUME_REPORT')
+    if resume:
+        previous_path = pathlib.Path(resume).resolve()
+        assert previous_path.is_relative_to((ROOT / 'bin/reports').resolve()), 'resume report must belong to this project'
+        previous = json.loads((previous_path / 'result.json').read_text())
+        assert previous.get('status') == 'failed' and previous.get('phase') == 'setup'
+        assert previous.get('cleanup', {}).get('status') == 'retained-for-debug'
+        CLUSTER = previous['cluster']
+        assert CLUSTER.startswith('simplecache-gateway-')
+        labels = json.loads(run(['docker', 'inspect', CLUSTER + '-control-plane', '--format={{json .Config.Labels}}']))
+        assert labels.get('io.x-k8s.kind.cluster') == CLUSTER and labels.get('io.x-k8s.kind.role') == 'control-plane'
+        PROXY_LOCAL = CLUSTER + ':envoy'
+        RESULTS['cluster'] = CLUSTER
+        RESULTS['resumed_from'] = str(previous_path)
+        run(['kind', 'export', 'kubeconfig', '--name', CLUSTER, '--kubeconfig', ENV['KUBECONFIG']])
+        default_pods = obj('pods')['items']
+        assert not any(p['metadata']['name'] == 'postgres' or p['metadata'].get('labels', {}).get('app') == 'products' for p in default_pods), 'resume only supports a retained pre-application setup'
+        k('wait', '--for=condition=Ready', 'node/' + CLUSTER + '-control-plane', '--timeout=180s')
+    else:
+        # Never reuse any existing user cluster by name.
+        assert CLUSTER not in run(['kind', 'get', 'clusters']).split()
     for image in [NODE, GATEWAY, PROXY, 'postgres:17-alpine']:
         try:
             run(['docker', 'image', 'inspect', image], timeout=30)
@@ -268,8 +366,9 @@ nodes:
             dataDir: /tmp/simplecache-etcd
 ''')
     CREATED = True  # Also clean up a partially created cluster on failure.
-    run(['kind', 'create', 'cluster', '--name', CLUSTER, '--image', NODE,
-         '--config', str(kind_config), '--kubeconfig', ENV['KUBECONFIG'], '--retain', '--wait', '180s'], timeout=600)
+    if not resume:
+        run(['kind', 'create', 'cluster', '--name', CLUSTER, '--image', NODE,
+             '--config', str(kind_config), '--kubeconfig', ENV['KUBECONFIG'], '--retain', '--wait', '180s'], timeout=600)
     # Docker/Kind archives lose the multi-platform registry index reference.
     # Retag the exact digest-verified platform artifact only for this offline
     # smoke; the Operator's ordinary Envoy deployment keeps EG's pinned default.
@@ -294,7 +393,7 @@ nodes:
     wait_for('operator', lambda: obj('deployment', 'simplecache-operator-controller-manager', 'simplecache-operator-system').get('status', {}).get('availableReplicas') == 1)
     schema = (ROOT / 'deploy/products/schema.sql').read_text()
     password = secrets.token_hex(16)
-    apply([
+    database_objects = [
         {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'product-schema'}, 'data': {'schema.sql': schema}},
         {'apiVersion': 'v1', 'kind': 'Secret', 'metadata': {'name': 'products'}, 'stringData': {
             'DATABASE_URL': f'postgres://cache:{password}@postgres:5432/products?sslmode=disable', 'CACHE_ADMIN_TOKEN': TOKEN, 'POSTGRES_PASSWORD': password}},
@@ -306,7 +405,13 @@ nodes:
                 'readinessProbe': {'tcpSocket': {'port': 5432}, 'periodSeconds': 2, 'timeoutSeconds': 1}}],
             'volumes': [{'name': 'schema', 'configMap': {'name': 'product-schema'}}]}},
         {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'postgres'}, 'spec': {'selector': {'app': 'postgres'}, 'ports': [{'port': 5432}]}},
-    ])
+    ]
+    if EXTENDED:
+        pg = next(o for o in database_objects if o['kind'] == 'Pod')
+        pg['spec']['volumes'].append({'name': 'functional-data', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '512Mi'}})
+        pg['spec']['containers'][0]['volumeMounts'].append({'name': 'functional-data', 'mountPath': '/var/lib/postgresql/data'})
+        RESULTS['postgres_storage'] = 'ephemeral emptyDir memory; SQL/notification semantics, no physical durability claim'
+    apply(database_objects)
     # Provision the external database first. The image's temporary init server
     # has no TCP listener, so Ready cannot precede schema initialization.
     wait_for('PostgreSQL initialized', lambda: any(c['type'] == 'Ready' and c['status'] == 'True'
@@ -320,9 +425,10 @@ nodes:
     wait_for('cache and gateway ready', lambda: condition(obj('simplecache', 'products'), 'Ready'), 300)
     selector = 'gateway.envoyproxy.io/owning-gateway-name=products,gateway.envoyproxy.io/owning-gateway-namespace=default'
     def ready_proxies():
-        pods = obj('pods', namespace='envoy-gateway-system', selector=selector)['items']
+        pods = [p for p in obj('pods', namespace='envoy-gateway-system', selector=selector)['items'] if not p['metadata'].get('deletionTimestamp')]
         return pods if len(pods) == 2 and all(any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', [])) for p in pods) else None
     proxies = wait_for('two proxy replicas', ready_proxies)
+    phase('routing-convergence')
     keys = ['item-' + str(i) for i in range(48)] + ['商品:a b+c/d?&']
     def literal(value):
         return "'" + value.replace("'", "''") + "'"
@@ -340,6 +446,7 @@ nodes:
         assert affinity(bases, keys) == mapping
         # Config/health views may differ before affinity converges. Retain that
         # startup work, then measure the stable repeat as a separate delta.
+        phase('stable-reads')
         startup_loads = worker_metrics('warm')
         assert len(keys) <= startup_loads <= len(keys) * 3, startup_loads
         assert affinity(bases, keys) == mapping
@@ -349,6 +456,7 @@ nodes:
         for raw in ['key=item%2d0', 'key=item-0&key=item-1', 'key=item-0&extra=x', 'key=a+b']:
             assert request(bases[0], '', raw=raw)[0] == 400, raw
         check('ambiguous query encodings rejected', 4)
+        phase('versioned-writes')
         key = keys[0]
         code, headers, _ = request(bases[0], key)
         assert code == 200
@@ -381,6 +489,7 @@ nodes:
         assert (status, h['etag'], json.loads(body)) == (200, '"v4"', 'recreated')
         assert worker_metrics('after-delete-replay') == before_delete_replay
         check('late deletion notification preserves a recreated value', 'v4 remained cached after replaying delete v3')
+        phase('worker-replacement')
         remaining = keys[1:]
         before = {key: value for key, value in mapping.items() if key in remaining}
         owner = before[remaining[0]].split('/')[-1]
@@ -392,6 +501,7 @@ nodes:
         wait_for('replacement keeps ownership', lambda: affinity(bases, remaining, before), 90)
         assert obj('service', 'products-shard-' + shard)['spec']['clusterIP'] == svc_ip
         check('Pod replacement preserves shard identity after health convergence', owner)
+        phase('shard-scaling')
         k('patch', 'simplecache', 'products', '--type=merge', '-p', '{"spec":{"size":4}}')
         wait_for('scale up ready', lambda: condition(obj('simplecache', 'products'), 'Ready'))
         grown = wait_for('scale up convergence', lambda: affinity(bases, remaining, shards=4), 90)
@@ -403,8 +513,13 @@ nodes:
         wait_for('scale down ready', lambda: condition(obj('simplecache', 'products'), 'Ready'))
         wait_for('scale down restores stable addresses', lambda: affinity(bases, remaining, before), 90)
         check('4 -> 3 shards removes backend and restores affinity', len(remaining))
+        if EXTENDED:
+            from scenarios import exercise
+            exercise(sys.modules[__name__], stack, bases, admins, remaining, [p['metadata']['uid'] for p in proxies])
+        phase('final-validation')
         worker_metrics('final')
         check('gateway reads do not perform Peer forwarding', 'per-worker metrics captured')
+    assert len(RESULTS['checks']) == (26 if EXTENDED else 10), 'scenario coverage incomplete'
     snapshot('success')
     RESULTS['status'] = 'passed'
 
@@ -427,7 +542,9 @@ if __name__ == '__main__':
         primary_failed = RESULTS.get('status') == 'failed'
         cleanup_error = None
         RESULTS['cleanup'] = {'status': 'not-created'}
-        if CREATED:
+        if CREATED and primary_failed and KEEP_FAILED:
+            RESULTS['cleanup'] = {'status': 'retained-for-debug', 'context': 'kind-' + CLUSTER, 'kubeconfig': ENV['KUBECONFIG']}
+        elif CREATED:
             for attempt in range(3):
                 try:
                     run(['kind', 'delete', 'cluster', '--name', CLUSTER], timeout=120)
@@ -441,7 +558,7 @@ if __name__ == '__main__':
             if cleanup_error is not None:
                 RESULTS['cleanup'] = {'status': 'failed', 'error': str(cleanup_error)}
                 RESULTS['status'] = 'failed'
-        if LOCAL_PROXY_TAG_CREATED:
+        if LOCAL_PROXY_TAG_CREATED and not (primary_failed and KEEP_FAILED):
             try:
                 run(['docker', 'image', 'rm', PROXY_LOCAL], timeout=30)
             except Exception as exc:
@@ -450,6 +567,7 @@ if __name__ == '__main__':
                 if cleanup_error is None:
                     cleanup_error = exc
         (REPORT / 'result.json').write_text(json.dumps(RESULTS, indent=2))
+        TRACE.close()
         LOG.close()
         print('Report:', REPORT, flush=True)
         if cleanup_error is not None and not primary_failed:

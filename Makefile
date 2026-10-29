@@ -67,3 +67,7 @@ kind-delete:
 .PHONY: gateway-smoke
 gateway-smoke:
 	python3 scripts/gateway/smoke.py
+
+.PHONY: gateway-experiments
+gateway-experiments:
+	GATEWAY_EXTENDED=1 python3 scripts/gateway/smoke.py

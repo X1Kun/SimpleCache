@@ -976,6 +976,96 @@ The owned Compose project and volume were removed. Gateway replay scenarios were
 added to make gateway-smoke, but the full Kubernetes smoke was not rerun in this
 commit; the preceding Gateway result above remains separate historical evidence.
 
+### Extended Gateway behavior experiments
+
+`make gateway-experiments` runs the baseline Gateway smoke and an extended
+scenario matrix in the same uniquely owned Kind cluster. Use
+`GATEWAY_KEEP_FAILED=1 make gateway-experiments` to retain only a failed run's
+cluster for diagnosis; a successful run cleans its cluster and temporary image
+tag. A retained run that failed during setup can be resumed only after its own
+node is healthy and before any cache/database Pods were deployed:
+
+```bash
+GATEWAY_RESUME_REPORT=bin/reports/<retained-run> make gateway-experiments
+```
+
+The runner validates that the report belongs to this project, records the prior
+run, checks the exact Kind node labels and refuses reuse if application Pods are
+already present. It never adopts an arbitrary existing user cluster. `result.json` records the current phase, passed checks and cleanup outcome;
+`requests.jsonl` records method/key/status/ETag/worker and payload digests without
+authentication credentials. Timings are diagnostic, not a benchmark.
+
+| Scenario group | Behavior checked |
+| --- | --- |
+| Shared entry | In-cluster HTTP client reads through the actual Gateway Service |
+| API rejection | Authentication, methods, key/value limits, JSON, preconditions and version-header validation preserve the source row |
+| Concurrent CAS | Twelve competing creates/replaces/deletes each have one SQL winner and eleven conflicts |
+| Partial delivery | An owned extra EndpointSlice models an unreachable known Peer; commit returns 202, notification-only retry later completes |
+| Bounded floors | 1,030 real source keys generate notifications; each worker retains at most 1,024 floors without Getter work |
+| Lost notification | An external versioned SQL update deliberately omits notification; old reads are observed, old writes fail, TTL recovers without restarting workers |
+| Explicit repair | Re-announcing the committed version repairs the old cache before TTL |
+| Source connectivity | Disconnect the owned PostgreSQL Service and terminate only its app sessions; unexpired hits survive, cold/expired reads fail, failed writes keep unknown-commit semantics |
+| Source recovery | Restore that Service, reload correct values and verify no hidden write occurred |
+| Worker recovery | A new worker loses cache/floors and reloads the primary after a missed event while retaining its shard Service IP |
+| Controller repair | Deleting the owned hash policy triggers its recreation, acceptance and restored affinity |
+| Proxy recovery | One proxy continues reading while the other is replaced; both converge afterward |
+
+Extended runs use an ephemeral memory-backed PostgreSQL data volume for
+SQL/notification experiments; they do not measure physical-disk persistence.
+Application-stage failures can be continued for the supported recovery phases:
+
+```bash
+GATEWAY_CONTINUE_REPORT=bin/reports/<retained-run> make gateway-experiments
+```
+
+Continuation verifies the exact cache and PostgreSQL Pod UIDs, obtains only that
+fixture's token without logging it, and preserves previous successful checks with
+their original run-report identity. It does not relabel a failed segment as a
+successful fresh run. Empty EndpointSlice endpoints may be JSON null and are
+handled as an empty collection during database-disconnection checks.
+
+Membership faults and database selectors are restored in `finally`. Counter
+comparisons use Pod UID and process start time so restarts cannot fake a zero
+source delta. These tests allow convergence windows and explicitly observe old
+reads when delivery is missing; they do not claim instant global freshness,
+durable event replay, database crash recovery or production availability.
+
+### Extended experiment results (2026-10-29)
+
+The [combined experiment report](../bin/reports/20261029T060505Z-gateway-95a427/report.md)
+records **26 passed functional checks**. This used one uniquely owned Kind node,
+two Envoy proxies, three/four cache workers and real PostgreSQL with temporary
+memory-backed data. SQL versions, payloads, worker identity and independent source
+queries were checked, rather than treating HTTP 200 alone as success.
+
+| Observation | Result |
+| --- | --- |
+| Stable baseline | 49 distinct values, both proxies agree; stable repeats add zero Getter calls |
+| Input protection | 13 invalid-request variants preserve the authoritative row |
+| Concurrent creates/replaces/deletes | Each race: 12 clients, one SQL winner, eleven HTTP 412 conflicts |
+| Partial delivery | Advertised unreachable known Peer yields HTTP 202 with DB commit retained; notification-only retry later succeeds |
+| Metadata pressure | 1,030 versioned-key announcements; all workers retain 1,024 floors, record evictions and add no Getter work |
+| Missing event | Old reads are actually observed in unchanged worker processes; a stale write returns 412; TTL and explicit notification restore new data |
+| Source disconnection | Unexpired hit returns 200; cold and expired reads return 503; failed write reports unknown commit and does not change its row |
+| Source restoration | Correct values reload, with no hidden mutation |
+| Worker/proxy replacement | Cold worker reloads the primary; surviving proxy serves twelve reads; both proxies converge after replacement |
+| Operator repair | A deleted owned hash policy is recreated with a new UID, accepted and used for consistent routing |
+
+The first segment's recovered environment ran 20 checks before its script hit a
+null EndpointSlice collection; its database selector had already been restored.
+After fixing that fixture compatibility issue, the [continuation result](../bin/reports/20261029T060505Z-gateway-95a427/result.json)
+validated ownership, retained those original checks, and passed the remaining six
+without rebuilding the application environment. Original failed setup/segment
+reports remain failed; each combined check identifies its actual run segment.
+Final cluster/image-tag cleanup succeeded. No cache/Operator runtime change was
+needed for these experiments.
+
+The initial TTL timing diagnostic included metric collection and must not be
+read as an expiry SLA; the assertion checked recovery under continuing hits and
+unchanged worker identities. The recorder now captures first-fresh response time
+before collecting metrics. These are finite, single-host functional scenarios,
+not performance/HA, durable-notification, physical-disk or database-crash tests.
+
 ### Diagnosis, metrics and CI
 
 Metrics distinguish API/Peer lookups, actual Peer and Getter calls, fallback,
@@ -1042,15 +1132,15 @@ and builds without publishing. CI does not run Kind or the heavy manual investig
 
 ## Delivery plan
 
-Priority remains functionality first, real-chain performance afterward.
-Gateway routing, conditional writes and runtime protection are merged. This
-commit adds source-version-bearing notifications, bounded retention, stale-result
-rejection and explicit acknowledgement of version semantics.
+Gateway routing, conditional writes, runtime protection and version-bearing
+notifications are merged. The current change completes the combined functional
+experiments, including explicitly missing notifications and fault/recovery.
+The next stage can establish performance on the real chain under declared budgets.
 
 | Stage | Work | Acceptance |
 | --- | --- | --- |
-| This commit | Versioned invalidation and bounded floors | Old/duplicate events preserve current data and flights; late old values cannot refill; deletion/recreation, floor retirement, legacy peers and unknown commits have defined behavior |
-| Combined semantics check | PostgreSQL + Gateway + cache Pods | Replay old/duplicate notifications through each proxy, check known-holder acknowledgements and unchanged source work for retained current values |
+| Merged | Versioned invalidation and bounded floors | Controlled race/SQL tests define old-event, late-fill, metadata-retirement and mixed-version behavior |
+| This commit | Combined Gateway behavior experiments | 26 checks pass with preserved identities, missed-event old reads, conditional-write protection, bounded metadata and fault recovery |
 | After functionality | Real-chain experiments | Measure end-to-end/component latency, multiple TTL cycles, sustained reads/writes, notification ordering and fault/recovery under equal declared budgets |
 | Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 
