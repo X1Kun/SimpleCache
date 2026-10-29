@@ -18,7 +18,9 @@ write latency. Overload is an explicit HTTP 503 with Retry-After.
 directly to local cache shards. The Operator manages multi-proxy configuration
 and stable per-shard Services; cache nodes retain discovery for invalidation.
 Legacy Peer routing remains the default. PostgreSQL stays authoritative;
-source-version-bearing invalidation is the next step. Start without cache replicas.
+writes now announce their committed source version. Bounded version floors and
+epoch fences protect cache admission; duplicate/old events preserve newer values.
+Notification delivery remains best effort. Start without cache replicas.
 
 Use the single [project guide](docs/design.md) for
 [current architecture](docs/design.md#current-implementation),
@@ -65,8 +67,10 @@ make gateway-smoke  # Real Envoy + PostgreSQL in a unique disposable Kind cluste
 make postgres-compare COMPARE_QUICK=1  # Existing functional smoke
 ```
 
-Next, implement source-version-bearing invalidation on the Gateway chain. Keep necessary development checks and smokes;
-full-chain performance experiments follow once these features work together.
+Versioned notification tests cover delayed/duplicate events, delete/recreate,
+metadata retirement and mixed-version peers. The Gateway smoke includes replay
+checks; keep functional validation separate from later full-chain performance
+experiments.
 
 Reports, original measurements and matching binaries are saved under ignored
 bin/reports. Historical Peer-routing/hot results do not establish performance

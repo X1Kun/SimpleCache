@@ -41,14 +41,21 @@ func New(bytesTotal int64, onEvicted func(key string, value Value)) *Cache {
 // Get looks up a key.
 // Expired entries are removed; successful reads refresh recency.
 func (c *Cache) Get(key string) (Value, bool) {
+	value, ok := c.Peek(key)
+	if ok {
+		c.ll.MoveToFront(c.cache[key])
+	}
+	return value, ok
+}
+
+// Peek checks expiration without refreshing recency. Caller owns synchronization.
+func (c *Cache) Peek(key string) (Value, bool) {
 	if e, ok := c.cache[key]; ok {
 		kv := e.Value.(*entry)
 		if !kv.expireAt.IsZero() && !kv.expireAt.After(time.Now()) {
 			c.RemoveElement(e)
 			return nil, false
 		}
-		c.ll.MoveToFront(e)
-
 		return kv.value, true
 	}
 	return nil, false

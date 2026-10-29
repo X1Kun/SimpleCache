@@ -8,6 +8,7 @@ import (
 )
 
 type Metrics struct {
+	versionEvents, versionRejections                           *prometheus.CounterVec
 	Registry                                                   *prometheus.Registry
 	api, peer, source                                          *prometheus.CounterVec
 	local                                                      *prometheus.CounterVec
@@ -41,6 +42,8 @@ func New() *Metrics {
 	m.writes = counter("simplecache_source_writes_total", "result")
 	m.invalidations = counter("simplecache_invalidations_total", "result")
 	m.broadcasts = counter("simplecache_invalidation_broadcasts_total", "result")
+	m.versionEvents = counter("simplecache_version_invalidations_total", "result")
+	m.versionRejections = counter("simplecache_version_rejections_total", "kind")
 	m.discardedFills = counter("simplecache_discarded_fills_total", "kind")
 	m.hotHits = prometheus.NewCounter(prometheus.CounterOpts{Name: "simplecache_hot_cache_hits_total", Help: "Successful local hot-cache lookups"})
 	m.apiDuration = histogram("simplecache_api_duration_seconds")
@@ -63,13 +66,17 @@ func New() *Metrics {
 	m.members = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_members", Help: "Published member count"})
 	m.Registry.MustRegister(m.api, m.peer, m.source, m.local, m.fallback, m.apiDuration, m.peerDuration, m.sourceDuration, m.slotWait, m.bloom, m.updates, m.discoveryErrors, m.inflight, m.members, prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	m.Registry.MustRegister(m.writes, m.invalidations, m.broadcasts)
-	m.Registry.MustRegister(m.discardedFills)
+	m.Registry.MustRegister(m.discardedFills, m.versionEvents, m.versionRejections)
 	m.Registry.MustRegister(m.hotHits)
 	m.Registry.MustRegister(m.writeDuration, m.broadcastDuration, m.rejections, m.unknownCommits, m.cleanupChecks, m.cleanupRemoved, m.cleanupBusy, m.cleanupDuration, m.writeInflight)
 	return m
 }
 func (m *Metrics) Observe(operation, result string, elapsed time.Duration) {
 	switch operation {
+	case "version_event":
+		m.versionEvents.WithLabelValues(result).Inc()
+	case "version_rejected":
+		m.versionRejections.WithLabelValues(result).Inc()
 	case "api":
 		m.api.WithLabelValues(result).Inc()
 		m.apiDuration.WithLabelValues(result).Observe(elapsed.Seconds())
@@ -125,6 +132,9 @@ func (m *Metrics) Cleanup(checked, removed int, elapsed time.Duration, busy bool
 // ObserveCache registers logical storage observations for the process's group.
 func (m *Metrics) ObserveCache(group *cache.Group) {
 	m.Registry.MustRegister(
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_version_records", Help: "Retained per-key source-version floors"}, func() float64 { return float64(group.Stats().VersionRecords) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_version_record_capacity", Help: "Maximum retained source-version floors per group"}, func() float64 { return float64(group.Stats().VersionCapacity) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{Name: "simplecache_version_record_evictions_total", Help: "Forgotten floors; retiring a floor also fences old in-flight fills"}, func() float64 { return float64(group.Stats().VersionEvictions) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_cache_bytes", Help: "Logical key/value bytes, not process RSS"}, func() float64 { return float64(group.Stats().Bytes) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_cache_capacity_bytes", Help: "Configured logical cache capacity"}, func() float64 { return float64(group.Stats().Capacity) }),
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: "simplecache_cache_entries", Help: "Stored entries including lazily expired entries"}, func() float64 { return float64(group.Stats().Entries) }),

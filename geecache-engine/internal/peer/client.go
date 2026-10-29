@@ -52,6 +52,9 @@ func (c *Client) GetWithExpiry(ctx context.Context, group, key string) (cache.Pe
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
+		if response.StatusCode == http.StatusServiceUnavailable && response.Header.Get(ErrorHeader) == "STALE_VERSION" {
+			return cache.PeerValue{}, cache.ErrStaleVersion
+		}
 		if response.StatusCode == http.StatusServiceUnavailable && response.Header.Get(ErrorHeader) == "OVERLOADED" {
 			return cache.PeerValue{}, cache.ErrOverloaded
 		}
