@@ -71,3 +71,8 @@ gateway-smoke:
 .PHONY: gateway-experiments
 gateway-experiments:
 	GATEWAY_EXTENDED=1 python3 scripts/gateway/smoke.py
+
+.PHONY: gateway-perf
+gateway-perf:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/gateway -p test_performance.py
+	GATEWAY_PERF=1 python3 scripts/gateway/smoke.py

@@ -65,6 +65,7 @@ make test-operator-ci
 make generated-check k8s-render compose-config
 make gateway-smoke  # Real Envoy + PostgreSQL in a unique disposable Kind cluster
 make gateway-experiments  # Extended concurrency, notification-loss and recovery scenarios
+make gateway-perf  # Paired in-cluster random/hash routing measurements
 make postgres-compare COMPARE_QUICK=1  # Existing functional smoke
 ```
 

@@ -1,7 +1,9 @@
 name: Container builds
 
 on:
-  # Automatic runs are temporarily paused during architecture development.
+  pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:

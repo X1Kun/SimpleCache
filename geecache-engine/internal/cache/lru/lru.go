@@ -2,6 +2,7 @@ package lru
 
 import (
 	"container/list"
+	"strings"
 	"time"
 )
 
@@ -141,6 +142,8 @@ func (c *Cache) AddUntil(key string, value Value, expireAt time.Time) {
 		kv.value = value
 		kv.expireAt = expireAt
 	} else {
+		// Own the bounded key rather than retaining an entire request URI.
+		key = strings.Clone(key)
 		ele := c.ll.PushFront(&entry{key: key, value: value, expireAt: expireAt})
 		c.cache[key] = ele
 		c.byteNow += int64(len(key)) + int64(value.Len())
