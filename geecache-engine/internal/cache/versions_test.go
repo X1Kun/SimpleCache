@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -106,8 +107,8 @@ func TestVersionedNotificationRejectsLateFillAndSeparatesFlights(t *testing.T) {
 		t.Fatal("duplicate event detached a fresh flight")
 	}
 	release <- struct{}{}
-	if err := <-old; !errors.Is(err, ErrStaleVersion) {
-		t.Fatal("late old source result accepted", err)
+	if err := <-old; err != nil {
+		t.Fatal("late source did not recover using the newer cached version", err)
 	}
 	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 2 || calls.Load() != 2 {
 		t.Fatal(v, err, calls.Load())
@@ -146,9 +147,9 @@ func TestFloorRetirementFencesWorkAndRetainsItsCapturedMinimum(t *testing.T) {
 	for _, loaded := range []int64{1, 2} {
 		t.Run(fmt.Sprint(loaded), func(t *testing.T) {
 			started, release := make(chan struct{}), make(chan struct{})
-			defer close(release)
+			var startedOnce sync.Once
 			g := NewGroup("retirement", 1024, versionGetterFunc(func(ctx context.Context, _ string) (SourceValue, error) {
-				close(started)
+				startedOnce.Do(func() { close(started) })
 				select {
 				case <-release:
 					return sourceValue(loaded), nil
@@ -176,7 +177,7 @@ func TestFloorRetirementFencesWorkAndRetainsItsCapturedMinimum(t *testing.T) {
 			if g.knownVersion("key") != 0 || g.currentEpoch("key") != before+1 || g.Stats().VersionRecords != 2 || g.Stats().VersionEvictions != 1 {
 				t.Fatal("floor retirement did not fence old work", g.Stats())
 			}
-			release <- struct{}{}
+			close(release)
 			err := <-done
 			if loaded == 1 && !errors.Is(err, ErrStaleVersion) {
 				t.Fatal("forgot the floor captured by active work", err)
@@ -340,8 +341,8 @@ func TestRetiredRouteFloorSurvivesFallbackAndDoesNotJoinWeakerWork(t *testing.T)
 			}
 			if pending {
 				releaseSource <- struct{}{}
-				if e := <-weak; !errors.Is(e, ErrStaleVersion) {
-					t.Fatal("weak result overwrote newer cache", e)
+				if e := <-weak; e != nil {
+					t.Fatal("weak result did not recover from newer cache", e)
 				}
 			}
 			if g.mainCache.version("key") != 2 || calls.Load() != 2 {

@@ -8,6 +8,7 @@ import (
 )
 
 type Metrics struct {
+	sourceRetries                                              *prometheus.CounterVec
 	versionEvents, versionRejections                           *prometheus.CounterVec
 	Registry                                                   *prometheus.Registry
 	api, peer, source                                          *prometheus.CounterVec
@@ -42,6 +43,7 @@ func New() *Metrics {
 	m.writes = counter("simplecache_source_writes_total", "result")
 	m.invalidations = counter("simplecache_invalidations_total", "result")
 	m.broadcasts = counter("simplecache_invalidation_broadcasts_total", "result")
+	m.sourceRetries = counter("simplecache_source_retries_total", "reason")
 	m.versionEvents = counter("simplecache_version_invalidations_total", "result")
 	m.versionRejections = counter("simplecache_version_rejections_total", "kind")
 	m.discardedFills = counter("simplecache_discarded_fills_total", "kind")
@@ -66,13 +68,15 @@ func New() *Metrics {
 	m.members = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_members", Help: "Published member count"})
 	m.Registry.MustRegister(m.api, m.peer, m.source, m.local, m.fallback, m.apiDuration, m.peerDuration, m.sourceDuration, m.slotWait, m.bloom, m.updates, m.discoveryErrors, m.inflight, m.members, prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	m.Registry.MustRegister(m.writes, m.invalidations, m.broadcasts)
-	m.Registry.MustRegister(m.discardedFills, m.versionEvents, m.versionRejections)
+	m.Registry.MustRegister(m.sourceRetries, m.discardedFills, m.versionEvents, m.versionRejections)
 	m.Registry.MustRegister(m.hotHits)
 	m.Registry.MustRegister(m.writeDuration, m.broadcastDuration, m.rejections, m.unknownCommits, m.cleanupChecks, m.cleanupRemoved, m.cleanupBusy, m.cleanupDuration, m.writeInflight)
 	return m
 }
 func (m *Metrics) Observe(operation, result string, elapsed time.Duration) {
 	switch operation {
+	case "source_retry":
+		m.sourceRetries.WithLabelValues(result).Inc()
 	case "version_event":
 		m.versionEvents.WithLabelValues(result).Inc()
 	case "version_rejected":

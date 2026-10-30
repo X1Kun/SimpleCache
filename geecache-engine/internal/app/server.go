@@ -23,6 +23,14 @@ import (
 
 const peerReadTimeout = time.Second
 
+// Covers the 5s request-body read and bounded mutation work.
+const responseWriteTimeout = 10 * time.Second
+
+func newDataServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 3 * time.Second,
+		ReadTimeout: 5 * time.Second, WriteTimeout: responseWriteTimeout, IdleTimeout: 30 * time.Second}
+}
+
 func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metrics, options ...APIOptions) http.Handler {
 	var opts APIOptions
 	if len(options) > 0 {
@@ -212,10 +220,10 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	}
 	var serving atomic.Bool
 	ready := func() bool { return serving.Load() && (watcher == nil || watcher.Ready()) }
-	servers := []*http.Server{{Addr: c.PeerAddr, Handler: peer.NewHandlerWithToken(c.AdminToken, group), ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}}
+	servers := []*http.Server{newDataServer(c.PeerAddr, peer.NewHandlerWithToken(c.AdminToken, group))}
 	if c.API {
 		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency, DirectReads: c.ReadRoutingMode == "gateway", NodeID: c.SelfID})
-		servers = append(servers, &http.Server{Addr: c.APIAddr, Handler: api, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second})
+		servers = append(servers, newDataServer(c.APIAddr, api))
 	}
 	if c.DebugAddr != "" {
 		servers = append(servers, &http.Server{Addr: c.DebugAddr, Handler: DebugHandler(), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second})

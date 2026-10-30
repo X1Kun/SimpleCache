@@ -3,8 +3,10 @@ package lru
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestPruneExpiredResumesAndDoesNotDeleteReplacements(t *testing.T) {
@@ -170,5 +172,25 @@ func TestCapacityPressure(t *testing.T) {
 	c.Add("e", String("1"), time.Hour)
 	if c.byteNow != 8 {
 		t.Fatalf("shrinking a value must reclaim bytes, got %d", c.byteNow)
+	}
+}
+
+func TestStoredKeysDoNotRetainRequestBacking(t *testing.T) {
+	backing := "short" + strings.Repeat("x", 512<<10)
+	key := backing[:5]
+	c := New(1024, nil)
+	c.Add(key, String("v"), time.Minute)
+	c.Add(key, String("updated"), time.Minute)
+	stored := c.ll.Front().Value.(*entry).key
+	if unsafe.StringData(stored) == unsafe.StringData(key) {
+		t.Fatal("entry retained request backing storage")
+	}
+	for indexed := range c.cache {
+		if unsafe.StringData(indexed) == unsafe.StringData(key) {
+			t.Fatal("index retained request backing storage")
+		}
+	}
+	if v, ok := c.Get(key); !ok || v.(String) != "updated" || c.Bytes() != 12 {
+		t.Fatal(v, ok, c.Bytes())
 	}
 }

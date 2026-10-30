@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated functional checks of the real gateway chain; no performance claims."""
+"""Isolated real-chain checks and exploratory routing measurements."""
 import contextlib
 import base64
 import datetime
@@ -31,8 +31,9 @@ TOKEN = secrets.token_urlsafe(24)
 PROXY_LOCAL = CLUSTER + ':envoy'
 LOCAL_PROXY_TAG_CREATED = False
 EXTENDED = os.environ.get('GATEWAY_EXTENDED', '0') == '1'
+PERFORMANCE = os.environ.get('GATEWAY_PERF', '0') == '1'
 KEEP_FAILED = os.environ.get('GATEWAY_KEEP_FAILED', '0') == '1'
-RESULTS = {'cluster': CLUSTER, 'gateway': GATEWAY, 'node': NODE, 'checks': [], 'suite': 'extended' if EXTENDED else 'smoke', 'phase': 'setup'}
+RESULTS = {'cluster': CLUSTER, 'gateway': GATEWAY, 'node': NODE, 'checks': [], 'suite': 'performance' if PERFORMANCE else ('extended' if EXTENDED else 'smoke'), 'phase': 'setup'}
 TRACE_LOCK = threading.Lock()
 TRACE = (REPORT / 'requests.jsonl').open('w')
 STARTED = time.monotonic()
@@ -311,6 +312,11 @@ def continue_retained_experiment(previous_name):
 def main():
     global CREATED, LOCAL_PROXY_TAG_CREATED, CLUSTER, PROXY_LOCAL
     print('Report:', REPORT, flush=True)
+    performance_continuation = os.environ.get('GATEWAY_PERF_CONTINUE_REPORT')
+    if performance_continuation:
+        assert PERFORMANCE
+        from performance import continue_retained
+        return continue_retained(sys.modules[__name__], performance_continuation)
     continuation = os.environ.get('GATEWAY_CONTINUE_REPORT')
     if continuation:
         assert EXTENDED
@@ -406,7 +412,7 @@ nodes:
             'volumes': [{'name': 'schema', 'configMap': {'name': 'product-schema'}}]}},
         {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'postgres'}, 'spec': {'selector': {'app': 'postgres'}, 'ports': [{'port': 5432}]}},
     ]
-    if EXTENDED:
+    if EXTENDED or PERFORMANCE:
         pg = next(o for o in database_objects if o['kind'] == 'Pod')
         pg['spec']['volumes'].append({'name': 'functional-data', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '512Mi'}})
         pg['spec']['containers'][0]['volumeMounts'].append({'name': 'functional-data', 'mountPath': '/var/lib/postgresql/data'})
@@ -418,6 +424,7 @@ nodes:
              for c in obj('pod', 'postgres').get('status', {}).get('conditions', [])), 300)
     apply({'apiVersion': 'cache.x1kun.com/v1', 'kind': 'SimpleCache', 'metadata': {'name': 'products'}, 'spec': {
         'image': 'simplecache-engine:gateway', 'size': 3, 'sourceSecret': 'products', 'ttlSeconds': 300,
+        **({'cacheBytes': 1048576} if PERFORMANCE else {}),
         'gateway': {'className': 'eg', 'replicas': 2}}})
     wait_for('EnvoyProxy created', lambda: obj('envoyproxy', 'products'))
     k('patch', 'envoyproxy', 'products', '--type=merge', '-p', json.dumps({
@@ -428,6 +435,12 @@ nodes:
         pods = [p for p in obj('pods', namespace='envoy-gateway-system', selector=selector)['items'] if not p['metadata'].get('deletionTimestamp')]
         return pods if len(pods) == 2 and all(any(c['type'] == 'Ready' and c['status'] == 'True' for c in p.get('status', {}).get('conditions', [])) for p in pods) else None
     proxies = wait_for('two proxy replicas', ready_proxies)
+    if PERFORMANCE:
+        from performance import measure
+        measure(sys.modules[__name__], proxies)
+        snapshot('success')
+        RESULTS['status'] = RESULTS.get('performance_status', 'passed')
+        return
     phase('routing-convergence')
     keys = ['item-' + str(i) for i in range(48)] + ['商品:a b+c/d?&']
     def literal(value):

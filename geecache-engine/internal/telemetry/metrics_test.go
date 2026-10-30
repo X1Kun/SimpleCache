@@ -61,13 +61,13 @@ func TestVersionGuardMetricsExposeBoundedRecordsAndRejectedLoads(t *testing.T) {
 	}
 	observed := map[string]float64{}
 	for _, family := range families {
-		if !strings.HasPrefix(family.GetName(), "simplecache_version_") {
+		if !strings.HasPrefix(family.GetName(), "simplecache_version_") && family.GetName() != "simplecache_source_retries_total" {
 			continue
 		}
 		for _, metric := range family.Metric {
 			name := family.GetName()
 			for _, label := range metric.Label {
-				if label.GetName() != "kind" && label.GetName() != "result" {
+				if label.GetName() != "kind" && label.GetName() != "result" && label.GetName() != "reason" {
 					t.Fatal("unbounded version metric label", label)
 				}
 				name += "/" + label.GetValue()
@@ -84,7 +84,8 @@ func TestVersionGuardMetricsExposeBoundedRecordsAndRejectedLoads(t *testing.T) {
 		"simplecache_version_records":                     cache.DefaultVersionRecords,
 		"simplecache_version_record_capacity":             cache.DefaultVersionRecords,
 		"simplecache_version_record_evictions_total":      1,
-		"simplecache_version_rejections_total/source":     1,
+		"simplecache_version_rejections_total/source":     2,
+		"simplecache_source_retries_total/stale_version":  1,
 		"simplecache_version_invalidations_total/ignored": 1,
 		"simplecache_version_invalidations_total/applied": cache.DefaultVersionRecords + 1,
 	} {

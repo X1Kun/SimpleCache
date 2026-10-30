@@ -1,10 +1,10 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-10-29. Main 3214100 contains Gateway routing,
-conditional writes, bounded admission and active expiration. This working tree
-adds committed-version invalidation, bounded version floors and replay/late-fill
-checks. Durable notification delivery remains optional future work. Historical
-measurements below refer to their original binaries.
+Documentation updated 2026-10-29. Main fb139ea includes Gateway routing,
+conditional writes, bounded version floors, active expiration and the combined
+26-check functional experiments. This working tree adds paired in-cluster
+routing measurements. Durable notification delivery and cache replicas remain
+optional future work; historical measurements retain their original scope.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -26,7 +26,7 @@ available for isolated cache and platform diagnostics.
 | Concern | Implemented now | Agreed next direction |
 | --- | --- | --- |
 | Authority | PostgreSQL owns values and per-key increasing versions | Keep PostgreSQL authoritative |
-| Reads | Opt-in Gateway -> local cache/source; legacy Peer routing remains the default | Establish real-chain performance after invalidation semantics |
+| Reads | Opt-in Gateway -> local cache/source; legacy Peer routing remains the default | Use paired route evidence; establish isolated baselines before capacity/SLO claims |
 | Writes | Authenticated create/update/delete with atomic source-version checks | Business services add their own predicates/transactions as needed |
 | Invalidation | Version-bearing best-effort HTTP fan-out, bounded floors and 256 epoch stripes | Durable delivery/catch-up only if required |
 | Expiration | Lookup-time checks plus bounded lifecycle-owned cleanup | Evaluate reclamation behavior under larger working sets |
@@ -91,8 +91,11 @@ queued time remains part of the 800ms source budget. Queue capacity zero rejects
 immediately when execution slots are full. Writes/cache-only invalidation API
 requests have a separate default concurrency bound of 16, acquired after
 authentication/key checks and before body buffering. Rejection returns 503 with
-Retry-After: 1 instead of waiting in another unbounded queue. There is no hidden
-automatic retry.
+Retry-After: 1 instead of waiting in another unbounded queue. Stale-version source results receive at most one retry inside the original
+800ms source budget, with the same waiter and normal source admission. Other
+errors and writes are not automatically retried. The retry retains the highest
+version observed during rejection even if its bounded metadata record is retired. API/Peer response writes have
+a 10s deadline covering body reads and bounded mutation work.
 
 These are application-work count limits, not a bound on all net/http connections,
 slow clients, response memory, process RSS or cluster-wide DB work. Value sizes,
@@ -1066,7 +1069,116 @@ unchanged worker identities. The recorder now captures first-fresh response time
 before collecting metrics. These are finite, single-host functional scenarios,
 not performance/HA, durable-notification, physical-disk or database-crash tests.
 
+### Real-chain routing measurements
+
+`make gateway-perf` creates its own Kind cluster and dedicated client Pod. The
+client reaches the shared Envoy Gateway Service on port 80. Measurements compare
+an exact-hostname RoundRobin control route with the ordinary key-hash route,
+using the same three worker processes/code, source, Gateway deployment and budgets.
+Each worker has 1MiB logical cache capacity; the default 512 x 4KiB dataset plus
+keys exceeds one cache but must fit all actual hash owners. Hash placement is
+queried and its per-owner byte totals validated before the capacity measurement.
+
+Default scenarios are warm hot-key reads, a cold same-key burst, cyclic capacity
+pressure, Zipf reads, 95/5 read/write windows, and repeated TTL expiry. Each pair
+runs three times; odd/even repeats alternate variant order. Logical request-index
+traces and deterministic full payloads are validated. The mixed driver bounds
+concurrency, drains each window and stops rather than retrying ambiguous writes.
+Read versions/ETags must agree. In mixed traffic, the committed lower bound is
+sampled from the latest successfully acknowledged write when each read is
+dispatched. Responses below that bound set both `stale_at_start` and `incorrect`,
+fail the workload and do not count as successes. Reads racing a write may return
+either version. This is not a linearizability checker. Historical measurements
+below used the earlier window-start lower bound.
+Mixed read failures remain in the raw trace, error counts and all-attempt
+percentiles; they do not prevent collecting the remaining measurements. Incorrect
+values, missing requests and failed/ambiguous writes still stop the run. An outcome
+with read errors is labelled `completed-with-read-errors`, never error-free.
+Final outcomes include both completed trials and retained failed attempts. Any
+incorrect/stale payload, missing request, empty attempt, write error or error
+without matching raw method evidence makes the final outcome `failed` and the
+command exits unsuccessfully after saving its reports. Only errors confirmed
+as GET failures may produce `completed-with-read-errors`.
+
+Setup, row resets, cache-process replacement, warmup and metric scrapes are outside
+client elapsed time. Every trial starts new cache processes; UID/start-time
+checks protect counter deltas. Owned fixture versions reset only while traffic is
+quiescent and before all cache/floor processes are replaced. PG/OS caches are not
+flushed. Both control/hash paths disable Peer forwarding and retain identical
+versioned invalidation behavior. Control routing is checked with actual requests,
+not inferred merely from policy acceptance.
+
+Reports include all-attempt and read/write latency percentiles, successful
+closed-loop completions per second, errors/503s, exact source-call deltas,
+cache-process CPU/allocation deltas and post-stage RSS. Kubelet samples describe
+cached observations in the stage envelope; their maxima are not continuous RSS
+peaks. Raw requests, configurations, client binary/hash, Pod identities and image
+IDs are retained. No subtraction of independently measured percentiles estimates
+Gateway-only overhead.
+
+This is single-host exploratory evidence, not a production SLO or offered-rate
+saturation test. Clients use a one-CPU budget and declared think time. Control-plane
+etcd and the temporary PostgreSQL data directory use memory-backed storage, so
+results do not establish disk I/O offload or durability. Host CPU/I/O pressure is
+recorded around every trial; contended results cannot be presented as clean
+performance baselines. A one-repeat/smaller trace can be selected for functional
+verification with GATEWAY_PERF_REPEATS and GATEWAY_PERF_READS, and is labelled by
+its actual parameters rather than counted as the default experiment.
+
+If a performance run is retained with `GATEWAY_KEEP_FAILED=1`,
+`GATEWAY_PERF_CONTINUE_REPORT=<report> make gateway-perf` can continue an owned
+failed measurement fixture. It verifies the Kind labels, cache/database UIDs,
+budgets and client binary checksum. Completed trials keep their original report
+paths; the failed attempt is retained separately and contributes to the overall
+error outcome. Restarting that trial does not rewrite its original failure.
+This path requires a recorded workload failure with its summary; it does not
+resume arbitrary setup/reset failures.
+
+The 2026-10-29 local run completed 36 trials (18 matched pairs), with 607,410
+requests and 768 successful conditional writes. Independent verification matched
+raw request/error counts, all-attempt/read/write percentiles, paired traces,
+source-counter deltas and client/runtime image identities. Final SQL checks found
+all three mixed-workload keys at version 129 with the full expected payload.
+Normal reads generated zero Peer requests. The owned cluster and temporary image
+tag were removed; existing clusters were preserved.
+
+| Scenario | Work per trial | Median source calls: RoundRobin | Median source calls: hash |
+| --- | --- | ---: | ---: |
+| Warm hot key | 32,768 reads | 0 | 0 |
+| Cold same-key burst | 192 reads | 3 | 1 |
+| Capacity pressure | 32,768 reads | 21,830 | 0 |
+| Zipf access | 32,768 reads | 2,711 | 0 |
+| Mixed | 2,432 reads + 128 conditional writes | 677 | 127 |
+| TTL cycles | 18 seconds, 5-second TTL | 12 | 4 |
+
+Capacity and Zipf results support the specific claim that key routing avoids
+duplicating a working set that fits across shards but exceeds one shard's cache.
+They do not prove a production throughput limit or a universal latency benefit.
+Host I/O pressure was material, PostgreSQL data was memory-backed, and the run
+continued in two sessions; latency/resource figures remain exploratory. The short
+mixed windows are finite concurrency checks, not a long-running soak test.
+
+The outcome is `completed-with-read-errors`: four GETs in the three RoundRobin
+mixed trials returned 503, matching four source-version rejection events. No
+incorrect payloads, missing requests, below-window-version reads or failed writes
+were observed. A prior stopped mixed trial contains one additional 503 and remains
+separate. All other completed trials, including the three hash mixed trials,
+had zero request errors. Rejecting a source result made obsolete by an arriving
+invalidation protects freshness but reduces read availability; a bounded fresh
+read retry was a follow-up candidate in that run. The current engine now retries
+once within the original source budget; these historical numbers do not measure
+the new behavior.
+
+Local evidence (ignored artifacts, not repository fixtures):
+[combined report](../bin/reports/20261029T144938Z-gateway-94e99f/performance.md),
+[raw verification](../bin/reports/20261029T144938Z-gateway-94e99f/verification.json),
+[final SQL audit](../bin/reports/20261029T144938Z-gateway-94e99f/final-database-audit.json),
+and the [original failed run](../bin/reports/20261029T070030Z-gateway-f6bce6/result.json).
+
 ### Diagnosis, metrics and CI
+
+`simplecache_source_retries_total{reason="stale_version"}` counts bounded retry
+decisions, including recovery from an already refreshed local cache.
 
 Metrics distinguish API/Peer lookups, actual Peer and Getter calls, fallback,
 slot wait/inflight, source writes, invalidation/fan-out, discarded source/hot
@@ -1122,26 +1234,27 @@ loopback-only mux; it is never exposed by public API/Peer handlers or Operator
 Services. Contention profiling is opt-in. Do not profile while establishing an
 unprofiled baseline. Repeated baselines remain separate from profiled results.
 
-[CI](../.github/workflows/ci.yml) can be started manually with workflow_dispatch;
-automatic push/PR triggers are temporarily paused during architecture development.
-It runs format/vet/race, diagnostics, builds,
+[CI](../.github/workflows/ci.yml) runs on pull requests and pushes to main, and
+can also be started manually with workflow_dispatch.
+It runs format/vet/race, Gateway Python regression tests, diagnostics, builds,
 Compose/startup, generated/render checks, Operator envtest and dedicated PG
 integration/quick comparison. Failed runs also upload available artifacts.
-The [container workflow](../.github/workflows/containers.yml) is also manual-only
+The [container workflow](../.github/workflows/containers.yml) uses the same triggers
 and builds without publishing. CI does not run Kind or the heavy manual investigations.
 
 ## Delivery plan
 
-Gateway routing, conditional writes, runtime protection and version-bearing
-notifications are merged. The current change completes the combined functional
-experiments, including explicitly missing notifications and fault/recovery.
-The next stage can establish performance on the real chain under declared budgets.
+Gateway routing, conditional writes, runtime protection, version-bearing
+notifications and the combined functional experiments are merged. This change
+adds paired measurements on the real chain under declared budgets. Exploratory
+single-host numbers remain distinct from an isolated capacity or SLO baseline.
 
 | Stage | Work | Acceptance |
 | --- | --- | --- |
 | Merged | Versioned invalidation and bounded floors | Controlled race/SQL tests define old-event, late-fill, metadata-retirement and mixed-version behavior |
-| This commit | Combined Gateway behavior experiments | 26 checks pass with preserved identities, missed-event old reads, conditional-write protection, bounded metadata and fault recovery |
-| After functionality | Real-chain experiments | Measure end-to-end/component latency, multiple TTL cycles, sustained reads/writes, notification ordering and fault/recovery under equal declared budgets |
+| Merged | Combined Gateway behavior experiments | 26 checks cover preserved identities, missed-event old reads, conditional-write protection, bounded metadata and fault recovery |
+| This commit | Paired real-chain routing measurements | Repeat six scenarios with equal budgets and preserve request errors, source counts, identities and environment limits |
+| Evidence-driven follow-up | Read availability and isolated capacity baselines | Validate bounded stale-version retry under real-chain mixed traffic; measure saturation separately when host interference is controlled |
 | Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 
 Keep the existing local/Peer evidence and functional Gateway smoke separate from

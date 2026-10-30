@@ -374,80 +374,102 @@ func (g *Group) getLocal(ctx context.Context, key string, lookupKind string, req
 		if v, hit, err := g.lookupAtLeast(work, key, minimum); hit || err != nil {
 			return v, err
 		}
-		waitStart := time.Now()
-		err := g.opts.Limiter.acquire(work)
-		slotResult := "acquired"
-		if err != nil {
-			slotResult = "timeout"
-			if errors.Is(err, ErrOverloaded) {
-				slotResult = "overloaded"
-				g.observe("rejected", "source_queue", 0)
+		retryEpoch, retryMinimum := epoch, minimum
+		for attempt := 0; ; attempt++ {
+			value, observedMinimum, err := g.loadSource(work, key, retryEpoch, retryMinimum)
+			retryMinimum = max(retryMinimum, observedMinimum)
+			if !errors.Is(err, ErrStaleVersion) || attempt == 1 || work.Err() != nil {
+				return value, err
 			}
-			if errors.Is(err, context.Canceled) {
-				slotResult = "canceled"
-			}
-		}
-		g.observe("slot", slotResult, time.Since(waitStart))
-		if err != nil {
-			return ByteView{}, err
-		}
-		defer g.opts.Limiter.release()
-		if err := work.Err(); err != nil {
-			return ByteView{}, err
-		}
-		if g.opts.Observer != nil {
-			g.opts.Observer.Inflight(1)
-			defer g.opts.Observer.Inflight(-1)
-		}
-		start := time.Now()
-		var value []byte
-		var version int64
-		if source, ok := g.getter.(VersionedGetter); ok {
-			loaded, loadErr := source.GetVersioned(work, key)
-			value, version, err = loaded.Value, loaded.Version, loadErr
-			if err == nil && version <= 0 {
-				err = errors.New("invalid source version")
-			}
-		} else {
-			value, err = g.getter.Get(work, key)
-		}
-		if err == nil {
-			err = work.Err()
-		}
-		if err == nil && len(value) > MaxValueBytes {
-			err = ErrValueTooLarge
-		}
-		g.observe("source", Result(err), time.Since(start))
-		if err != nil {
-			return ByteView{}, err
-		}
-		if err := work.Err(); err != nil {
-			return ByteView{}, err
-		}
-		view := ByteView{b: cloneBytes(value), version: version}
-		// Check and insert under the same lock as invalidation. A pre-invalidation
-		// reader may finish with its old value, but cannot repopulate the cache.
-		g.epochMu.Lock()
-		stale := version < max(minimum, g.knownVersionLocked(key))
-		valid := epoch == g.epochs[g.epochBucket(key)] && !stale
-		if valid {
-			view = g.mainCache.add(key, view, g.opts.TTL)
-			if g.opts.HotCacheBytes > 0 {
-				g.hotCache.remove(key)
+			g.observe("source_retry", "stale_version", 0)
+			var floor int64
+			retryEpoch, floor = g.readBarrier(key)
+			retryMinimum = max(retryMinimum, floor)
+			if value, hit, err := g.lookupAtLeast(work, key, retryMinimum); hit || err != nil {
+				return value, err
 			}
 		}
-		g.epochMu.Unlock()
-		if stale {
-			g.observe("version_rejected", "source", 0)
-			g.observe("discard_source", "source_version", 0)
-			return ByteView{}, ErrStaleVersion
-		}
-		if !valid {
-			g.observe("discard_source", "epoch_changed", 0)
-		}
-		return view, nil
 	})
 	return await(ctx, result)
+}
+
+// loadSource returns the highest floor it observed, including during rejection.
+// Retry must retain it even if bounded metadata is retired before the next attempt.
+// Its caller owns the shared deadline.
+func (g *Group) loadSource(work context.Context, key string, epoch uint64, minimum int64) (ByteView, int64, error) {
+	waitStart := time.Now()
+	err := g.opts.Limiter.acquire(work)
+	slotResult := "acquired"
+	if err != nil {
+		slotResult = "timeout"
+		if errors.Is(err, ErrOverloaded) {
+			slotResult = "overloaded"
+			g.observe("rejected", "source_queue", 0)
+		}
+		if errors.Is(err, context.Canceled) {
+			slotResult = "canceled"
+		}
+	}
+	g.observe("slot", slotResult, time.Since(waitStart))
+	if err != nil {
+		return ByteView{}, minimum, err
+	}
+	defer g.opts.Limiter.release()
+	if err := work.Err(); err != nil {
+		return ByteView{}, minimum, err
+	}
+	if g.opts.Observer != nil {
+		g.opts.Observer.Inflight(1)
+		defer g.opts.Observer.Inflight(-1)
+	}
+	start := time.Now()
+	var value []byte
+	var version int64
+	if source, ok := g.getter.(VersionedGetter); ok {
+		loaded, loadErr := source.GetVersioned(work, key)
+		value, version, err = loaded.Value, loaded.Version, loadErr
+		if err == nil && version <= 0 {
+			err = errors.New("invalid source version")
+		}
+	} else {
+		value, err = g.getter.Get(work, key)
+	}
+	if err == nil {
+		err = work.Err()
+	}
+	if err == nil && len(value) > MaxValueBytes {
+		err = ErrValueTooLarge
+	}
+	g.observe("source", Result(err), time.Since(start))
+	if err != nil {
+		return ByteView{}, minimum, err
+	}
+	if err := work.Err(); err != nil {
+		return ByteView{}, minimum, err
+	}
+	view := ByteView{b: cloneBytes(value), version: version}
+	// Check and insert under the same lock as invalidation. A pre-invalidation
+	// reader may finish with its old value, but cannot repopulate the cache.
+	g.epochMu.Lock()
+	minimum = max(minimum, g.knownVersionLocked(key))
+	stale := version < minimum
+	valid := epoch == g.epochs[g.epochBucket(key)] && !stale
+	if valid {
+		view = g.mainCache.add(key, view, g.opts.TTL)
+		if g.opts.HotCacheBytes > 0 {
+			g.hotCache.remove(key)
+		}
+	}
+	g.epochMu.Unlock()
+	if stale {
+		g.observe("version_rejected", "source", 0)
+		g.observe("discard_source", "source_version", 0)
+		return ByteView{}, minimum, ErrStaleVersion
+	}
+	if !valid {
+		g.observe("discard_source", "epoch_changed", 0)
+	}
+	return view, minimum, nil
 }
 
 func ValidateKey(key string) error {
