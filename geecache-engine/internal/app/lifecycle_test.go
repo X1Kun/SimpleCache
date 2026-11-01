@@ -2,9 +2,11 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -93,5 +95,64 @@ func TestShutdownDrainsActiveRequest(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdown did not finish")
+	}
+}
+
+func TestBindServersClosesEarlierListenersOnPartialFailure(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := reservation.Addr().String()
+	_ = reservation.Close()
+	listeners, err := bindServers([]*http.Server{{Addr: address}, {Addr: address}})
+	if err == nil || listeners != nil {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+		t.Fatal("duplicate binding unexpectedly succeeded")
+	}
+	reopened, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatal("partial binding leaked the first listener", err)
+	}
+	_ = reopened.Close()
+}
+
+func TestDataServerTimesOutBlockedResponse(t *testing.T) {
+	finished := make(chan error, 1)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := make([]byte, 1<<20)
+		for i := 0; i < 64; i++ {
+			if _, err := w.Write(chunk); err != nil {
+				finished <- err
+				return
+			}
+		}
+		finished <- nil
+	})
+	server := httptest.NewUnstartedServer(handler)
+	server.Config = newDataServer("", handler)
+	server.Start()
+	defer server.Close()
+	conn, err := net.DialTCP("tcp", nil, server.Listener.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetReadBuffer(1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		var timeout net.Error
+		if !errors.As(err, &timeout) || !timeout.Timeout() {
+			t.Fatal("expected response write timeout", err)
+		}
+	case <-time.After(responseWriteTimeout + 3*time.Second):
+		t.Fatal("blocked response outlived write deadline")
 	}
 }

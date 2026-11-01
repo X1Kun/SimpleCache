@@ -16,11 +16,10 @@ Tests stay alongside the code whose contract they exercise.
 
 ## App
 
-- `bootstrap.go`: source selection, component wiring and background tasks.
-- `lifecycle.go`: bind all listeners, roll back partial binding, readiness/drain.
-- `api.go`: HTTP routes and public API options.
+- `bootstrap.go`: source selection, component wiring, background tasks, all-listener binding/rollback and readiness/drain.
+- `api.go`: HTTP routes, public API options and canonical query-key parsing.
 - `mutations_http.go`: authentication, validation, body limits, write admission,
-  preconditions and HTTP response encoding.
+  ETag preconditions and HTTP response encoding.
 - `mutations.go`: transport-independent mutation commands/outcomes, source writes
   and post-commit/best-effort notification coordination.
 
@@ -32,11 +31,14 @@ Existing exported entrypoints and JSON/status contracts remain unchanged.
 
 ## Cache
 
-- `group.go`, `interfaces.go`, `options.go`, `errors.go`: aggregate state and contracts.
+- `group.go`: Group, options/defaults, construction and aggregate statistics.
+- `interfaces.go`, `errors.go`: external contracts, errors and boundary validation.
 - `read.go`: lookup, routing, flight coalescing, fallback and bounded retry.
 - `load.go`: one admitted source attempt and guarded cache fill.
 - `versions.go`: version floors, invalidation, epochs and Peer admission.
-- Storage, admission and maintenance remain in their existing focused files.
+- `cache.go`: ByteView, local storage and bounded expiration maintenance.
+- `admission.go`: API/Peer waiter admission and source concurrency/queue limits.
+- `bloomfilter.go`, `lru/`: membership filtering and LRU storage primitives.
 
 `readFence` is a value snapshot of epoch/minimum, not another synchronization
 owner. `sourceResult.minimum` carries the highest floor observed during a load.
@@ -49,7 +51,18 @@ TTL and hot-copy rules must remain intact when changing these files.
 
 `router.go` owns the member snapshot and optional read ring. `client.go` and
 `server.go` handle Peer reads. `protocol.go` owns shared headers, version parsing
-and authentication; `invalidation_client.go` handles one-node notification/ack;
-`invalidation.go` owns bounded fan-out over one captured membership snapshot.
+and authentication; `invalidation.go` keeps one-node notification/ack alongside
+bounded fan-out over one captured membership snapshot.
 The notification protocol remains best effort; reports do not imply global
 reader synchronization or durable event delivery.
+
+## File organization
+
+Keep code together when readers need it for the same behavior. A short file can
+remain separate when its responsibility is independent (for example debug.go).
+Read/load/version logic and complex version/overload tests remain separate.
+
+App tests are grouped by behavior: lifecycle tests include listener rollback and
+blocked response writes; config tests cover parsing/defaults; API tests cover
+routing/input behavior; mutation and conditional tests cover their respective
+write contracts. Tests remain next to implementation in the same package.
