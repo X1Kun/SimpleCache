@@ -1,9 +1,10 @@
 package cache
 
 import (
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache/lru"
 	"sync"
 	"time"
+
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache/lru"
 )
 
 // cache adds synchronization and a byte limit to the LRU.

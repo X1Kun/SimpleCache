@@ -1,10 +1,12 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-10-29. Main fb139ea includes Gateway routing,
-conditional writes, bounded version floors, active expiration and the combined
-26-check functional experiments. This working tree adds paired in-cluster
-routing measurements. Durable notification delivery and cache replicas remain
-optional future work; historical measurements retain their original scope.
+Documentation updated 2026-11-01. Main 9bb7a2d includes Gateway routing,
+conditional writes, bounded version floors, active expiration, runtime safeguards,
+paired routing measurements and the combined 26-check functional experiments.
+This working tree separates validation tooling into explicit per-run environment,
+suite and reporting modules, groups Go workloads under internal/bench and
+validation under internal/validation, and groups deployment examples under deploy. Durable notification delivery and cache replicas
+remain optional future work; historical measurements retain their original scope.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -33,6 +35,12 @@ available for isolated cache and platform diagnostics.
 | Protection | Bounded API/Peer miss waiters, shared routes, source queue and writes | Validate budgets against real container memory and workloads |
 | Replication | Disposable hot copies, no replicated shard groups | Start without cache replication; add only for measured recovery needs |
 | Deployment | StatefulSet, optional Envoy Gateway with multiple proxies and stable shard Services | Retain EndpointSlice discovery for invalidation; no cache replica groups |
+
+Runtime code is organized by responsibility within the existing Go packages;
+see the [runtime module map](../geecache-engine/internal/README.md). App assembly,
+HTTP handling and mutation coordination are separate files. Cache read/load
+paths retain one Group and the original lock ownership; Peer protocol helpers,
+one-node notification transport and snapshot fan-out have distinct files.
 
 ### Current read path and protection
 
@@ -728,6 +736,21 @@ available through their internal API/Pod addresses.
 
 ### Commands and reports
 
+Go workload implementations live in `geecache-engine/internal/bench/{gateway,postgres,diagnostics}`.
+`internal/validation/report` aggregates test/profile evidence and
+`internal/validation/scenarios` holds adversarial tests. Runtime packages do not
+import these tooling packages. Public `cmd` entrypoints and historical report
+paths/formats remain stable. See [the module map](../geecache-engine/internal/bench/README.md).
+
+Gateway orchestration lives in `tools/validation`: `environment` owns commands,
+provisioning and cleanup; `gateway` owns suites and shared fixture access;
+`reporting` owns per-run evidence and outcome aggregation. `python3 -m
+tools.validation --suite smoke|extended|performance` is the explicit entrypoint.
+The existing make targets and `scripts/gateway` compatibility entrypoints remain.
+Imports do not create artifacts or clusters. Each explicit run has an isolated
+context; exception/interruption cleanup and report finalization belong to that
+context. Run `make gateway-test` for tool regression checks without Docker.
+
 ```bash
 make check             # Formatting, tests/race, build and vet
 make test-ci           # Uncached engine race/coverage
@@ -1246,15 +1269,17 @@ and builds without publishing. CI does not run Kind or the heavy manual investig
 
 Gateway routing, conditional writes, runtime protection, version-bearing
 notifications and the combined functional experiments are merged. This change
-adds paired measurements on the real chain under declared budgets. Exploratory
+separates validation environment ownership, suite orchestration and reporting,
+with import-safe entrypoints and explicit run contexts. Exploratory
 single-host numbers remain distinct from an isolated capacity or SLO baseline.
 
 | Stage | Work | Acceptance |
 | --- | --- | --- |
 | Merged | Versioned invalidation and bounded floors | Controlled race/SQL tests define old-event, late-fill, metadata-retirement and mixed-version behavior |
 | Merged | Combined Gateway behavior experiments | 26 checks cover preserved identities, missed-event old reads, conditional-write protection, bounded metadata and fault recovery |
-| This commit | Paired real-chain routing measurements | Repeat six scenarios with equal budgets and preserve request errors, source counts, identities and environment limits |
-| Evidence-driven follow-up | Read availability and isolated capacity baselines | Validate bounded stale-version retry under real-chain mixed traffic; measure saturation separately when host interference is controlled |
+| Merged | Paired real-chain routing measurements | Six scenarios preserve request errors, source counts, identities and environment limits |
+| This change | Validation tooling boundaries | Import-safe modules, explicit per-run state, owned-resource cleanup, report compatibility and existing suite behavior |
+| Evidence-driven follow-up | Controlled capacity and stability baselines | Add bounded offered-rate scheduling and diverse deterministic datasets; measure saturation and recovery under declared environment conditions |
 | Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 
 Keep the existing local/Peer evidence and functional Gateway smoke separate from

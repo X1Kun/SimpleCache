@@ -86,8 +86,9 @@ and etcd; it does not deploy cache Pods into an existing cluster.
 
 | Path | Contents |
 | --- | --- |
-| geecache-engine | Cache, source adapter, HTTP API/Peer, discovery, metrics and diagnostic tools |
+| geecache-engine | [Runtime module map](geecache-engine/internal/README.md); workloads under internal/bench; validation under internal/validation |
 | simplecache-operator | Kubebuilder API, controller and Kubernetes manifests |
-| deploy / scripts | Example deployments and repeatable validation workflows |
+| deploy / scripts | Deployment examples (demo/products/kind/gateway/observability), development scripts and compatibility entrypoints |
+| tools/validation | Gateway environment lifecycle, functional/fault/performance suites and reporting |
 | docs/design.md | Architecture, operation, evidence and agreed roadmap |
 | .github/workflows | Build and validation CI |

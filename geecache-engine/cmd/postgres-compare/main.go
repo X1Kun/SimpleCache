@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/productcompare"
+	postgresbench "github.com/X1Kun/simpleCache/geecache-engine/internal/bench/postgres"
 )
 
 func main() {
-	var options productcompare.Options
+	var options postgresbench.Options
 	flag.StringVar(&options.Server, "server", "", "Loopback PostgreSQL fixture binary")
 	flag.StringVar(&options.Dir, "dir", "", "Fresh artifact directory")
 	flag.IntVar(&options.Repeats, "repeats", 3, "Paired repeats, 3-5; quick permits 1")
@@ -32,7 +32,7 @@ func main() {
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
 	defer cancel()
-	if _, err := productcompare.Run(ctx, options); err != nil {
+	if _, err := postgresbench.Run(ctx, options); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

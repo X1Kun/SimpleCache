@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/validationreport"
+	report "github.com/X1Kun/simpleCache/geecache-engine/internal/validation/report"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "-dir is required")
 		os.Exit(2)
 	}
-	r, err := validationreport.Generate(*dir)
+	r, err := report.Generate(*dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

@@ -15,16 +15,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-const (
-	BasePath      = "/_geecache/"
-	MaxBodyBytes  = cache.MaxValueBytes + 1024
-	ErrorHeader   = "X-SimpleCache-Error"
-	TTLHeader     = "X-SimpleCache-TTL-Nanoseconds"
-	VersionHeader = "X-SimpleCache-Version"
-)
-
-var ErrGroupNotFound = errors.New("peer group not found")
-
 type Client struct {
 	address string
 	http    *http.Client

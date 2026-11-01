@@ -5,6 +5,19 @@ import (
 	"strings"
 )
 
+// readFence captures the epoch and minimum version observed by one flight.
+// Its scalar minimum survives bounded metadata retirement. Group.epochMu owns
+// shared epoch/floor state; lock order remains epochMu -> cache.mu.
+type readFence struct {
+	epoch   uint64
+	minimum int64
+}
+
+func (f readFence) withMinimum(minimum int64) readFence {
+	f.minimum = max(f.minimum, minimum)
+	return f
+}
+
 // DefaultVersionRecords bounds independent version metadata per Group. Keys
 // already obey the 256-byte key bound. This logical bound is not an RSS quota.
 const DefaultVersionRecords = 1024
@@ -13,6 +26,7 @@ type versionRecord struct {
 	key     string
 	version int64
 }
+
 type versionFloors struct {
 	capacity  int
 	entries   map[string]*list.Element
@@ -32,6 +46,7 @@ func (g *Group) knownVersionLocked(key string) int64 {
 	}
 	return version
 }
+
 func (g *Group) knownVersion(key string) int64 {
 	g.epochMu.Lock()
 	defer g.epochMu.Unlock()
@@ -103,4 +118,55 @@ func (g *Group) InvalidateVersion(key string, version int64) error {
 		g.observe("version_event", result, 0)
 	}
 	return nil
+}
+
+func (g *Group) readBarrier(key string) readFence {
+	g.epochMu.Lock()
+	defer g.epochMu.Unlock()
+	return readFence{g.epochs[g.epochBucket(key)], g.knownVersionLocked(key)}
+}
+
+// Invalidate removes a local copy and separates subsequent callers from both
+// old routing and old source flights. It never changes the source or forwards.
+func (g *Group) Invalidate(key string) error {
+	return g.InvalidateVersion(key, 0)
+}
+
+// acceptPeer validates known source versions even when hot caching is disabled.
+// Unknown/older Peer data falls back to the primary source through Get.
+func (g *Group) acceptPeer(key string, value ByteView, fence readFence) error {
+	g.epochMu.Lock()
+	if value.Version() < max(fence.minimum, g.knownVersionLocked(key)) {
+		g.epochMu.Unlock()
+		g.observe("version_rejected", "peer", 0)
+		return ErrStaleVersion
+	}
+	eligible := g.opts.HotCacheBytes > 0 && value.RemainingTTL() > 0 && int64(len(key)+value.Len()) <= g.opts.HotCacheBytes
+	valid := fence.epoch == g.epochs[g.epochBucket(key)]
+	if eligible && valid {
+		if value.Version() > g.mainCache.version(key) {
+			g.mainCache.remove(key)
+		}
+		g.hotCache.add(key, value, g.opts.HotTTL)
+	}
+	g.epochMu.Unlock()
+	if eligible && !valid {
+		g.observe("discard_hot", "epoch_changed", 0)
+	}
+	return nil
+}
+
+func (g *Group) currentEpoch(key string) uint64 {
+	g.epochMu.Lock()
+	defer g.epochMu.Unlock()
+	return g.epochs[g.epochBucket(key)]
+}
+
+func (g *Group) epochBucket(key string) uint64 {
+	// FNV-1a over a string avoids allocating a []byte on each cache miss.
+	hash := uint64(14695981039346656037)
+	for i := 0; i < len(key); i++ {
+		hash = (hash ^ uint64(key[i])) * 1099511628211
+	}
+	return hash & uint64(g.opts.EpochBuckets-1)
 }
