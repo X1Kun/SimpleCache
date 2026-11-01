@@ -51,7 +51,7 @@ diagnostics() {
   go test -json -count=1 -timeout=2m -o "$report_dir/scenarios.test" \
     -cpuprofile="$report_dir/cpu.pprof" -memprofile="$report_dir/heap.pprof" \
     -mutexprofile="$report_dir/mutex.pprof" -blockprofile="$report_dir/block.pprof" \
-    ./internal/validation | tee "$report_dir/diagnostics.jsonl"
+    ./internal/validation/scenarios | tee "$report_dir/diagnostics.jsonl"
 }
 performance_build() {
   cd "$project_root/geecache-engine" || return "$?"

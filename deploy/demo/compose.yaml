@@ -1,0 +1,36 @@
+name: geecache-engine
+
+# Services.
+services:
+  # Compose service name.
+  cache-1:
+    # Build the image from the engine module context.
+    build: ../../geecache-engine
+    # Container name.
+    container_name: cache-1
+    ports:
+      # Port mapping: host port to container port.
+      - "9999:9999"
+    environment:
+      # Static peer configuration.
+      - SELF_ADDR=http://cache-1:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    # Enable the API and listen on the internal peer port.
+    command: ["./geecache-server", "-port=8001", "-api=1"]
+
+  cache-2:
+    build: ../../geecache-engine
+    container_name: cache-2
+    # Peer-only node; no published host port.
+    environment:
+      - SELF_ADDR=http://cache-2:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    command: ["./geecache-server", "-port=8001"]
+
+  cache-3:
+    build: ../../geecache-engine
+    container_name: cache-3
+    environment:
+      - SELF_ADDR=http://cache-3:8001
+      - PEERS=http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+    command: ["./geecache-server", "-port=8001"]

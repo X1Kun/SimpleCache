@@ -3,8 +3,9 @@ package peer
 import (
 	"context"
 	"errors"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 	"net/http"
+
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 )
 
 func Status(err error) int {

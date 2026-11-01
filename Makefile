@@ -29,6 +29,7 @@ test-operator-ci:
 	bash scripts/validation/run.sh operator
 
 compose-config:
+	docker compose -f deploy/demo/compose.yaml config --quiet
 	docker compose -f geecache-engine/docker-compose.yml config --quiet
 	docker compose -f deploy/products/compose.yaml config --quiet
 
@@ -66,13 +67,15 @@ kind-delete:
 
 .PHONY: gateway-smoke
 gateway-smoke:
-	python3 scripts/gateway/smoke.py
+	python3 -m tools.validation --suite smoke
 
 .PHONY: gateway-experiments
 gateway-experiments:
-	GATEWAY_EXTENDED=1 python3 scripts/gateway/smoke.py
+	python3 -m tools.validation --suite extended
 
-.PHONY: gateway-perf
-gateway-perf:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/gateway -p test_performance.py
-	GATEWAY_PERF=1 python3 scripts/gateway/smoke.py
+.PHONY: gateway-test gateway-perf
+gateway-test:
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/validation/tests
+
+gateway-perf: gateway-test
+	python3 -m tools.validation --suite performance

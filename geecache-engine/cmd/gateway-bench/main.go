@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/gatewayperf"
 	"log"
 	"os"
 	"time"
+
+	gatewaybench "github.com/X1Kun/simpleCache/geecache-engine/internal/bench/gateway"
 )
 
 func main() {
@@ -18,7 +19,7 @@ func main() {
 	if e != nil {
 		log.Fatal("configuration open failed")
 	}
-	var c gatewayperf.Config
+	var c gatewaybench.Config
 	e = json.NewDecoder(file).Decode(&c)
 	_ = file.Close()
 	if e != nil {
@@ -26,7 +27,7 @@ func main() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	result, e := gatewayperf.Run(ctx, c, *out)
+	result, e := gatewaybench.Run(ctx, c, *out)
 	if e != nil {
 		log.Printf("workload failed: %v; status counts: %v", e, result.StatusCounts)
 		os.Exit(1)

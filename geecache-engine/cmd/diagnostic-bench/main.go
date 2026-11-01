@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/diagnostics"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/bench/diagnostics"
 )
 
 func main() {
