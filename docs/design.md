@@ -1,12 +1,12 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-11-01. Main abced40 includes Gateway routing,
-conditional writes, bounded version floors, active expiration, runtime safeguards,
-paired routing measurements and the organized runtime/validation tooling layout.
-This working tree consolidates same-package helper files and groups app tests
-by behavior, preserving declarations and protocol contracts. Durable notification
-delivery and cache replicas remain optional future work; historical measurements
-retain their original scope.
+Documentation updated 2026-11-02. Main a82d217 includes Gateway routing,
+conditional writes, bounded version floors, runtime safeguards, validation tooling
+and the consolidated runtime file layout. This working tree clarifies read-entry
+ownership, extracts Peer reads, validates directly constructed configurations
+before startup and names existing timeout policies. Valid documented workloads
+retain their routing, admission and protocol contracts; invalid direct configs
+now fail earlier. Historical measurements retain their original scope.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -37,7 +37,9 @@ available for isolated cache and platform diagnostics.
 | Deployment | StatefulSet, optional Envoy Gateway with multiple proxies and stable shard Services | Retain EndpointSlice discovery for invalidation; no cache replica groups |
 
 Runtime code is organized by responsibility within the existing Go packages;
-see the [runtime module map](../geecache-engine/internal/README.md). App assembly,
+see the [runtime module map](../geecache-engine/internal/README.md),
+[reading order](../geecache-engine/internal/README.md#reading-order) and
+[timeout/cancellation index](../geecache-engine/internal/README.md#timeout-and-cancellation-index). App assembly,
 HTTP handling and mutation coordination are separate files. Cache read/load
 paths retain one Group and the original lock ownership; Peer protocol helpers,
 one-node notification transport and snapshot fan-out have distinct files.
@@ -1279,7 +1281,8 @@ single-host numbers remain distinct from an isolated capacity or SLO baseline.
 | Merged | Combined Gateway behavior experiments | 26 checks cover preserved identities, missed-event old reads, conditional-write protection, bounded metadata and fault recovery |
 | Merged | Paired real-chain routing measurements | Six scenarios preserve request errors, source counts, identities and environment limits |
 | Merged | Runtime and validation boundaries | Explicit runtime responsibilities, import-safe tools, owned-resource cleanup and report compatibility |
-| This change | Cohesive file organization | Co-locate related helpers and behavior tests; preserve implementation/test declarations and concurrency contracts |
+| Merged | Cohesive file organization | Related helpers and behavior tests are co-located |
+| This change | Read/configuration clarity | Explicit read-entry ownership, extracted Peer reads, pure common validation with startup-specific requirements, and named timeout policies |
 | Evidence-driven follow-up | Controlled capacity and stability baselines | Add bounded offered-rate scheduling and diverse deterministic datasets; measure saturation and recovery under declared environment conditions |
 | Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
 

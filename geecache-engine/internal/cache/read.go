@@ -10,6 +10,26 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// readEntry describes admission/metrics ownership, not the routing mode.
+type readEntry uint8
+
+const (
+	readFallback readEntry = iota // Outer Get already admitted this request; do not acquire another waiter slot.
+	readAPI
+	readPeer
+)
+
+func (entry readEntry) label() string {
+	switch entry {
+	case readAPI:
+		return "api"
+	case readPeer:
+		return "peer"
+	default:
+		return ""
+	}
+}
+
 func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) {
 	if err := ctx.Err(); err != nil {
 		return ByteView{}, false, err
@@ -88,25 +108,9 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 		defer func() { <-g.routeTasks }()
 		if g.opts.Peers != nil {
 			if peer, ok := g.opts.Peers.PickPeer(key); ok {
-				start := time.Now()
-				var value PeerValue
-				var err error
-				if expiring, ok := peer.(ExpiringPeerGetter); ok {
-					value, err = expiring.GetWithExpiry(work, g.name, key)
-				} else {
-					value.Value, err = peer.Get(work, g.name, key)
-				}
-				g.observe("peer", Result(err), time.Since(start))
+				view, err := g.readFromPeer(work, key, peer, fence)
 				if err == nil {
-					if len(value.Value) > MaxValueBytes {
-						err = ErrValueTooLarge
-					} else {
-						view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt, version: value.Version}
-						err = g.acceptPeer(key, view, fence)
-						if err == nil {
-							return view, nil
-						}
-					}
+					return view, nil
 				}
 				if errors.Is(err, ErrNotFound) && max(fence.minimum, g.knownVersion(key)) == 0 {
 					return ByteView{}, err
@@ -125,40 +129,40 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 				// Transport, protocol and unknown-group failures fall back to the local source.
 			}
 		}
-		return g.getLocal(work, key, "", fence.minimum)
+		return g.getLocal(work, key, readFallback, fence.minimum)
 	})
 	return await(ctx, result)
 }
 
 // GetLocal never selects a peer. Source work has its own bounded lifecycle.
 func (g *Group) GetLocal(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, "peer", 0)
+	return g.getLocal(ctx, key, readPeer, 0)
 }
 
 // GetDirect is the public Gateway-mode read path: API admission and source
 // coalescing, with neither routeFlight nor an outgoing Peer request.
 func (g *Group) GetDirect(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, "api", 0)
+	return g.getLocal(ctx, key, readAPI, 0)
 }
 
-func (g *Group) getLocal(ctx context.Context, key string, lookupKind string, required int64) (ByteView, error) {
+func (g *Group) getLocal(ctx context.Context, key string, entry readEntry, required int64) (ByteView, error) {
 	v, hit, err := g.lookupAtLeast(ctx, key, required)
-	if lookupKind != "" {
+	if entry != readFallback {
 		result := "miss"
 		if hit {
 			result = "hit"
 		}
-		g.observe("lookup_"+lookupKind, result, 0)
+		g.observe("lookup_"+entry.label(), result, 0)
 	}
 	if hit || err != nil {
 		return v, err
 	}
-	if lookupKind != "" {
+	if entry != readFallback {
 		lane := g.peerWaiters
-		if lookupKind == "api" {
+		if entry == readAPI {
 			lane = g.apiWaiters
 		}
-		if !g.admit(lane, lookupKind+"_waiter") {
+		if !g.admit(lane, entry.label()+"_waiter") {
 			return ByteView{}, ErrOverloaded
 		}
 		defer func() { <-lane }()
@@ -189,4 +193,29 @@ func (g *Group) getLocal(ctx context.Context, key string, lookupKind string, req
 
 func flightKey(fence readFence, key string) string {
 	return strconv.FormatUint(fence.epoch, 10) + ":" + strconv.FormatInt(fence.minimum, 10) + ":" + key
+}
+
+// readFromPeer performs one transport read and guarded admission. Get owns
+// terminal-error classification and the decision to fall back to the source.
+func (g *Group) readFromPeer(work context.Context, key string, peer PeerGetter, fence readFence) (ByteView, error) {
+	start := time.Now()
+	var value PeerValue
+	var err error
+	if expiring, ok := peer.(ExpiringPeerGetter); ok {
+		value, err = expiring.GetWithExpiry(work, g.name, key)
+	} else {
+		value.Value, err = peer.Get(work, g.name, key)
+	}
+	g.observe("peer", Result(err), time.Since(start))
+	if err != nil {
+		return ByteView{}, err
+	}
+	if len(value.Value) > MaxValueBytes {
+		return ByteView{}, ErrValueTooLarge
+	}
+	view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt, version: value.Version}
+	if err := g.acceptPeer(key, view, fence); err != nil {
+		return ByteView{}, err
+	}
+	return view, nil
 }

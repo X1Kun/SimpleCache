@@ -152,3 +152,52 @@ func TestCanceledCallerCannotBypassRouteWorkBound(t *testing.T) {
 		t.Fatal("duplicate work or leaked capacity", calls.Load(), g.AdmissionStats())
 	}
 }
+
+type entryEvents struct{ lookups chan string }
+
+func (o entryEvents) Observe(operation, result string, _ time.Duration) {
+	if operation == "lookup_api" || operation == "lookup_peer" {
+		o.lookups <- operation
+	}
+}
+func (entryEvents) Inflight(float64) {}
+
+func TestReadEntriesOwnExactlyOneWaiterLane(t *testing.T) {
+	for _, name := range []string{"api", "peer", "fallback"} {
+		t.Run(name, func(t *testing.T) {
+			events := entryEvents{lookups: make(chan string, 4)}
+			var g *Group
+			observed := make(chan AdmissionStats, 1)
+			g = NewGroup(name, 1024, GetterFunc(func(context.Context, string) ([]byte, error) {
+				observed <- g.AdmissionStats()
+				return []byte("value"), nil
+			}), Options{MaxMissWaiters: 1, Observer: events})
+			get := g.GetDirect
+			wantAPI, wantPeer, wantRoute := 1, 0, 0
+			wantLabel := "lookup_api"
+			if name == "peer" {
+				get = g.GetLocal
+				wantAPI, wantPeer = 0, 1
+				wantLabel = "lookup_peer"
+			}
+			if name == "fallback" {
+				get = g.Get
+				wantRoute = 1
+			}
+			if _, err := get(context.Background(), "key"); err != nil {
+				t.Fatal("fallback acquired a duplicate lane", err)
+			}
+			state := <-observed
+			if state.APIWaiters != wantAPI || state.PeerWaiters != wantPeer || state.RouteTasks != wantRoute {
+				t.Fatal(state)
+			}
+			if len(events.lookups) != 1 || <-events.lookups != wantLabel {
+				t.Fatal("lookup metrics changed across entry types")
+			}
+			state = g.AdmissionStats()
+			if state.APIWaiters != 0 || state.PeerWaiters != 0 || state.RouteTasks != 0 {
+				t.Fatal("waiter leaked", state)
+			}
+		})
+	}
+}
