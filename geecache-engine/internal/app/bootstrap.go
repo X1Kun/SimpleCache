@@ -20,20 +20,30 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const peerReadTimeout = time.Second
+const (
+	peerReadTimeout       = time.Second
+	sourceStartupTimeout  = 5 * time.Second
+	readHeaderTimeout     = 3 * time.Second
+	requestReadTimeout    = 5 * time.Second
+	connectionIdleTimeout = 30 * time.Second
+	shutdownGracePeriod   = 5 * time.Second
+)
 
 // Covers the 5s request-body read and bounded mutation work.
 const responseWriteTimeout = 10 * time.Second
 
 func Run(ctx context.Context, c Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateSourceConfig(); err != nil {
+		return err
+	}
 	switch c.SourceMode {
 	case "", "demo":
 		return RunWithSource(ctx, c, demo.New(100*time.Millisecond))
 	case "postgres":
-		if c.DatabaseURL == "" || c.AdminToken == "" {
-			return errors.New("postgres mode requires DATABASE_URL and CACHE_ADMIN_TOKEN")
-		}
-		startup, cancel := context.WithTimeout(ctx, 5*time.Second)
+		startup, cancel := context.WithTimeout(ctx, sourceStartupTimeout)
 		defer cancel()
 		source, err := postgres.Open(startup, c.DatabaseURL, int32(c.SourceConcurrency))
 		if err != nil {
@@ -48,11 +58,8 @@ func Run(ctx context.Context, c Config) error {
 
 // RunWithSource shares the real server lifecycle with the isolated diagnostic fixture.
 func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
-	if err := validateDebugAddr(c.DebugAddr); err != nil {
+	if err := c.Validate(); err != nil {
 		return err
-	}
-	if c.ProfileContention && c.DebugAddr == "" {
-		return errors.New("contention profiling requires DEBUG_ADDR")
 	}
 	if source == nil {
 		return errors.New("source is required")
@@ -62,12 +69,6 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	defer cancel()
 	if c.ReadRoutingMode == "" {
 		c.ReadRoutingMode = "peer"
-	}
-	if c.ReadRoutingMode != "peer" && c.ReadRoutingMode != "gateway" {
-		return errors.New("unsupported read routing mode")
-	}
-	if c.ReadRoutingMode == "gateway" && c.HotCacheBytes != 0 {
-		return errors.New("gateway routing cannot reserve a hot area")
 	}
 	var router *peer.Router
 	if c.ReadRoutingMode == "gateway" {
@@ -124,7 +125,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		servers = append(servers, newDataServer(c.APIAddr, api))
 	}
 	if c.DebugAddr != "" {
-		servers = append(servers, &http.Server{Addr: c.DebugAddr, Handler: DebugHandler(), ReadHeaderTimeout: 3 * time.Second, IdleTimeout: 30 * time.Second})
+		servers = append(servers, &http.Server{Addr: c.DebugAddr, Handler: DebugHandler(), ReadHeaderTimeout: readHeaderTimeout, IdleTimeout: connectionIdleTimeout})
 	}
 	// Bind every port before declaring readiness or starting discovery.
 	listeners, err := bindServers(servers)
@@ -153,8 +154,8 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 }
 
 func newDataServer(addr string, handler http.Handler) *http.Server {
-	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 3 * time.Second,
-		ReadTimeout: 5 * time.Second, WriteTimeout: responseWriteTimeout, IdleTimeout: 30 * time.Second}
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout: requestReadTimeout, WriteTimeout: responseWriteTimeout, IdleTimeout: connectionIdleTimeout}
 }
 
 // bindServers opens every listener before readiness and closes partial work on error.
@@ -189,7 +190,7 @@ func serve(ctx context.Context, servers []*http.Server, listeners []net.Listener
 		}
 	}
 	serving.Store(false)
-	shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdown, stop := context.WithTimeout(context.Background(), shutdownGracePeriod)
 	defer stop()
 	for _, server := range servers {
 		if err := server.Shutdown(shutdown); err != nil {

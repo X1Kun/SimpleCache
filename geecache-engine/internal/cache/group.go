@@ -8,6 +8,12 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// Read task defaults belong to the cache; application wait budgets are separate.
+const (
+	defaultRouteTimeout  = 1200 * time.Millisecond
+	defaultSourceTimeout = 800 * time.Millisecond
+)
+
 type Options struct {
 	TTL           time.Duration
 	KnownKeys     []string
@@ -71,10 +77,10 @@ func normalizeOptions(opts Options, capacity int64) Options {
 		opts.TTL = time.Minute
 	}
 	if opts.RouteTimeout == 0 {
-		opts.RouteTimeout = 1200 * time.Millisecond
+		opts.RouteTimeout = defaultRouteTimeout
 	}
 	if opts.SourceTimeout == 0 {
-		opts.SourceTimeout = 800 * time.Millisecond
+		opts.SourceTimeout = defaultSourceTimeout
 	}
 	if opts.Lifecycle == nil {
 		opts.Lifecycle = context.Background()

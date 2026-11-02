@@ -15,6 +15,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+const apiReadTimeout = 1500 * time.Millisecond
+
 type APIOptions struct {
 	Store               MutableSource
 	Router              *peer.Router
@@ -79,7 +81,7 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 			result = mutate(w, r, group, opts, metrics, false)
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
+		ctx, cancel := context.WithTimeout(r.Context(), apiReadTimeout)
 		defer cancel()
 		key, keyErr := requestKey(r, opts.DirectReads)
 		if keyErr != nil {

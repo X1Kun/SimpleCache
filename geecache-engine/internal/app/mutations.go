@@ -28,6 +28,13 @@ type mutationResponse struct {
 	Error           string                   `json:"error,omitempty"`
 }
 
+// Source-write and read-source budgets are independent policies even though
+// their current durations match.
+const (
+	mutationTimeout       = 3 * time.Second
+	mutationSourceTimeout = 800 * time.Millisecond
+)
+
 type mutationKind uint8
 
 const (
@@ -55,14 +62,14 @@ func executeMutation(lifecycle context.Context, group *cache.Group, store Mutabl
 	if lifecycle == nil {
 		lifecycle = context.Background()
 	}
-	work, cancel := context.WithTimeout(lifecycle, 3*time.Second)
+	work, cancel := context.WithTimeout(lifecycle, mutationTimeout)
 	defer cancel()
 	var outcome mutationOutcome
 	response := &outcome.response
 	version := command.version
 	if command.kind != mutationNotify {
 		writeStart := time.Now()
-		source, stop := context.WithTimeout(work, 800*time.Millisecond)
+		source, stop := context.WithTimeout(work, mutationSourceTimeout)
 		var committedVersion int64
 		if command.kind == mutationPut {
 			committedVersion, outcome.writeErr = store.PutIfVersion(source, command.key, command.value, command.expected)
