@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gateway-bench
+  labels:
+    app: gateway-bench
+spec:
+  securityContext:
+    runAsUser: 65532
+    runAsGroup: 65532
+  containers:
+    - name: client
+      image: simplecache-engine:gateway
+      command: [/bin/sh, -c, sleep 86400]
+      env:
+        - name: GOMAXPROCS
+          value: "1"
+        - name: CACHE_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: products
+              key: CACHE_ADMIN_TOKEN
+      resources:
+        requests:
+          cpu: 500m
+          memory: 128Mi
+        limits:
+          cpu: "1"
+          memory: 256Mi

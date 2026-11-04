@@ -206,7 +206,7 @@ func Generate(dir string) (Report, error) {
 			fmt.Fprintf(&md, "```json\n%s\n```\n\n", pretty.String())
 		}
 	}
-	md.WriteString("## Interpretation\n\nLegacy local diagnostic profiles cover the combined scenario test process. Separate-process performance runs profile only the named server subprocess; their unprofiled baseline and profiled trials are reported separately. Both use loopback and synthetic sources, not deployed Pods. Source limits and SingleFlight are per process. Logical cache bytes are not RSS; removals include expiry. Reported timings are observations, not fixed performance gates. Kind uses one host and does not prove multi-machine availability. Aborted or interrupted stages are failures, not passes. N/A/null counts mean uncollected, not zero.\n")
+	md.WriteString("## Interpretation\n\nLocal scenario tests emit functional-contract evidence. Their profiles cover the combined test process, including the client and assertions; they do not establish server throughput or resource baselines. Continuity probe timings include port-forward overhead and are diagnostic observations. Separate-process performance runs profile only the named server subprocess; their unprofiled baseline and profiled trials are reported separately. Both use loopback and synthetic sources, not deployed Pods. Source limits and SingleFlight are per process. Logical cache bytes are not RSS; removals include expiry. Reported timings are observations, not fixed performance gates. Kind uses one host and does not prove multi-machine availability. Aborted or interrupted stages are failures, not passes. N/A/null counts mean uncollected, not zero.\n")
 	return r, os.WriteFile(filepath.Join(dir, "report.md"), []byte(md.String()), 0644)
 }
 

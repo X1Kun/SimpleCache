@@ -1,0 +1,7 @@
+# Validation only: temporary tmpfs etcd, not control-plane crash durability.
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    etcd:
+      local:
+        dataDir: /tmp/simplecache-etcd

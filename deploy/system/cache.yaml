@@ -12,6 +12,7 @@ metadata:
 spec:
   image: simplecache-engine:gateway
   size: 3
+  cacheBytes: 67108864
   sourceSecret: products
   ttlSeconds: 60
   gateway:

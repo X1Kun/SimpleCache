@@ -3,14 +3,10 @@ package validation
 
 import (
 	"context"
-
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,11 +14,14 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/app"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/bench/democlient"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/demo"
 )
 
-func evidence(t *testing.T, data any) {
+func evidence(t *testing.T, data map[string]any) {
 	t.Helper()
+	data["evidence_kind"] = "functional-contract"
 	b, err := json.Marshal(data)
 	if err != nil {
 		t.Fatal(err)
@@ -161,85 +160,52 @@ func TestCapacityEvictionAndReload(t *testing.T) {
 	}
 }
 
-// Use the deployed timeout budget; a 40ms healthy-path assertion is noisy
-// when race instrumentation and another local cluster share this host.
-
-// Baselines use real HTTP handlers on loopback with a synthetic 2ms source.
-// They are not deployed-Pod throughput numbers and do not include race overhead.
-func TestHTTPDiagnosticBaselines(t *testing.T) {
-	for _, scenario := range []string{"warm-hot", "distinct-keys", "capacity-pressure"} {
-		t.Run(scenario, func(t *testing.T) {
-			var sourceCalls atomic.Int64
-			capacity := int64(2 << 20)
-			if scenario == "capacity-pressure" {
-				capacity = 16 << 10
-			}
-			valueFor := func(key string) string {
-				if scenario == "capacity-pressure" {
-					return key + strings.Repeat("v", 4096)
-				}
-				return key
-			}
-			g := cache.NewGroup("scores", capacity, cache.GetterFunc(func(ctx context.Context, key string) ([]byte, error) {
-				sourceCalls.Add(1)
-				select {
-				case <-time.After(2 * time.Millisecond):
-					return []byte(valueFor(key)), nil
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				}
+// Fixed request counts verify HTTP/cache contracts independently of machine speed.
+// Use diagnostic-bench for separate-process latency, throughput and profiles.
+func TestHTTPReadContracts(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		keys, valueBytes int
+		capacity         int64
+		wantSource       int64
+	}{
+		{"warm-hot", 1, 0, 2 << 20, 1},
+		{"distinct-keys", 32, 0, 2 << 20, 32},
+		{"capacity-pressure", 32, 512, 1024, 64},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int64
+			g := cache.NewGroup("scores", tc.capacity, cache.GetterFunc(func(_ context.Context, key string) ([]byte, error) {
+				calls.Add(1)
+				return []byte(demo.AutoValue(key, tc.valueBytes)), nil
 			}), cache.Options{})
-			s := httptest.NewServer(app.APIHandler(g, func() bool { return true }, nil))
-			defer s.Close()
-			client := &http.Client{Timeout: 2 * time.Second}
+			server := httptest.NewServer(app.APIHandler(g, func() bool { return true }, nil))
+			defer server.Close()
+			client := democlient.NewClient(1, 2*time.Second)
 			defer client.CloseIdleConnections()
-			if scenario == "warm-hot" {
-				if _, e := g.Get(context.Background(), "hot"); e != nil {
-					t.Fatal(e)
+			if tc.name == "warm-hot" {
+				if _, err := g.Get(context.Background(), "Auto-0"); err != nil {
+					t.Fatal(err)
 				}
 			}
-			var next atomic.Int64
-			var mu sync.Mutex
-			var latencies []float64
-			var failures atomic.Int64
-			start := time.Now()
-			deadline := start.Add(time.Second)
-			burst(t, 16, func(int) error {
-				for time.Now().Before(deadline) {
-					i := next.Add(1)
-					key := "hot"
-					if scenario == "distinct-keys" {
-						key = fmt.Sprint(i)
-					}
-					if scenario == "capacity-pressure" {
-						key = fmt.Sprint(i % 256)
-					}
-					began := time.Now()
-					r, e := client.Get(s.URL + "/api?key=" + key)
-					if e != nil {
-						failures.Add(1)
-					} else {
-						body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-						r.Body.Close()
-						if err != nil || r.StatusCode != 200 || string(body) != valueFor(key) {
-							failures.Add(1)
-						}
-					}
-					mu.Lock()
-					latencies = append(latencies, float64(time.Since(began).Microseconds())/1000)
-					mu.Unlock()
+			for i := 0; i < 64; i++ {
+				key := fmt.Sprintf("Auto-%d", i%tc.keys)
+				result := democlient.Read(context.Background(), client, server.URL, key, tc.valueBytes)
+				if result.Failed || result.Incorrect {
+					t.Fatal(result.Detail)
 				}
-				return nil
-			})
-			sort.Float64s(latencies)
-			if len(latencies) == 0 {
-				t.Fatal("no samples")
+				if stats := g.Stats(); stats.Bytes > stats.Capacity {
+					t.Fatalf("capacity exceeded: %+v", stats)
+				}
 			}
-			percentile := func(p float64) float64 { return latencies[int(float64(len(latencies)-1)*p)] }
-			evidence(t, map[string]any{"environment": "loopback HTTP, synthetic source", "scenario": scenario, "workers": 16, "source_delay_ms": 2, "requests": len(latencies), "errors": failures.Load(), "elapsed_seconds": time.Since(start).Seconds(), "p50_ms": percentile(.50), "p95_ms": percentile(.95), "p99_ms": percentile(.99), "source_calls": sourceCalls.Load(), "cache": g.Stats()})
-			if failures.Load() != 0 {
-				t.Fatal("HTTP errors or incorrect values")
+			stats := g.Stats()
+			if calls.Load() != tc.wantSource {
+				t.Fatalf("source calls=%d, want %d", calls.Load(), tc.wantSource)
 			}
+			if tc.name == "capacity-pressure" && stats.Removals == 0 {
+				t.Fatal("expected eviction and reload")
+			}
+			evidence(t, map[string]any{"environment": "in-process loopback HTTP, synthetic source", "scenario": tc.name, "requests": 64, "source_calls": calls.Load(), "cache": stats})
 		})
 	}
 }

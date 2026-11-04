@@ -12,6 +12,7 @@ import threading
 import time
 import urllib.request
 
+from ..environment.fixtures import deploy_benchmark
 from .helpers import metric, sql
 from .performance import reset_workers, pressure
 
@@ -179,12 +180,7 @@ def measure(m, proxies):
                        env=environment, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
     services = m.obj('services', namespace='envoy-gateway-system', selector='gateway.envoyproxy.io/owning-gateway-name=products,gateway.envoyproxy.io/owning-gateway-namespace=default')['items']
     service = next(s for s in services if any(p['port'] == 80 for p in s['spec']['ports']))
-    m.apply({'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': 'gateway-bench', 'labels': {'app': 'gateway-bench'}}, 'spec': {
-        'securityContext': {'runAsUser': 65532, 'runAsGroup': 65532},
-        'containers': [{'name': 'client', 'image': 'simplecache-engine:gateway', 'command': ['/bin/sh', '-c', 'sleep 86400'],
-                        'env': [{'name': 'GOMAXPROCS', 'value': '2'}],
-                        'resources': {'requests': {'cpu': '500m', 'memory': '128Mi'}, 'limits': {'cpu': '2', 'memory': '256Mi'}}}]}})
-    m.k('wait', '--for=condition=Ready', 'pod/gateway-bench', '--timeout=120s')
+    deploy_benchmark(m, 'arrival')
     m.k('cp', str(binary), 'gateway-bench:/tmp/gateway-bench')
     manifest = {'scope': 'One-host Kind, separate client/cache/PostgreSQL Pods, real Envoy Gateway and production binaries. Memory-backed PostgreSQL; not disk durability or production SLO.',
                 'scheduler': {'max_schedule_lag_ms': 5, 'max_catch_up': 8}, 'distributions': distributions(m.env), 'stages': schedule(), 'client_sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),

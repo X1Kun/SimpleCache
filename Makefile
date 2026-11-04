@@ -4,6 +4,7 @@
 
 # Prevent Go from invoking Git for automatic version stamping.
 export GOFLAGS := $(GOFLAGS) -buildvcs=false
+PYTHON ?= python3
 
 test:
 	bash scripts/validation/run.sh unit
@@ -64,18 +65,18 @@ kind-delete:
 
 .PHONY: gateway-smoke
 gateway-smoke:
-	python3 -m tools.validation --suite smoke
+	$(PYTHON) -m tools.validation --suite smoke
 
 .PHONY: gateway-experiments
 gateway-experiments:
-	python3 -m tools.validation --suite extended
+	$(PYTHON) -m tools.validation --suite extended
 
 .PHONY: gateway-test gateway-perf
 gateway-test:
-	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/validation/tests
+	PYTHONDONTWRITEBYTECODE=1 $(PYTHON) -m unittest discover -s tools/validation/tests
 
 gateway-perf: gateway-test
-	python3 -m tools.validation --suite performance
+	$(PYTHON) -m tools.validation --suite performance
 
 .PHONY: arrival-smoke
 # Requires an explicitly selected disposable PostgreSQL database; owns its schema.
@@ -85,8 +86,20 @@ arrival-smoke:
 
 .PHONY: gateway-arrival
 gateway-arrival:
-	python3 -m tools.validation --suite arrival
+	$(PYTHON) -m tools.validation --suite arrival
 
 .PHONY: arrival-calibration
 arrival-calibration:
-	python3 -m tools.validation.arrival_calibration
+	$(PYTHON) -m tools.validation.arrival_calibration
+
+.PHONY: dev-up dev-status dev-down dev-schema-upgrade dev-destroy
+dev-up:
+	$(PYTHON) -m tools.system up
+dev-status:
+	$(PYTHON) -m tools.system status
+dev-down:
+	$(PYTHON) -m tools.system down
+dev-schema-upgrade:
+	$(PYTHON) -m tools.system schema-upgrade
+dev-destroy:
+	$(PYTHON) -m tools.system destroy

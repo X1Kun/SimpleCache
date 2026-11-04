@@ -20,6 +20,7 @@ type Options struct {
 }
 
 type Summary struct {
+	LatencyMethod    string  `json:"latency_method"`
 	Status           string  `json:"status"`
 	Environment      string  `json:"environment"`
 	Seconds          int     `json:"seconds"`
@@ -81,7 +82,7 @@ func (o Options) Validate() error {
 
 // Run always writes a partial summary on failure; each trial owns a fresh server.
 func Run(ctx context.Context, o Options) (summary Summary, result error) {
-	summary = Summary{Status: "failed", Environment: "separate client/server processes on one host; synthetic immutable source", Seconds: o.Seconds, Repeats: o.Repeats, Workers: o.Workers, ThinkMS: 1, SourceDelayMS: 100, ServerGOMAXPROCS: 2, Quick: o.Quick}
+	summary = Summary{LatencyMethod: "nearest-rank", Status: "failed", Environment: "separate client/server processes on one host; synthetic immutable source", Seconds: o.Seconds, Repeats: o.Repeats, Workers: o.Workers, ThinkMS: 1, SourceDelayMS: 100, ServerGOMAXPROCS: 2, Quick: o.Quick}
 	if err := o.Validate(); err != nil {
 		return summary, err
 	}
