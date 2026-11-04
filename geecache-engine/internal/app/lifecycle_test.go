@@ -35,7 +35,7 @@ func TestShutdownDrainsActiveRequest(t *testing.T) {
 		}
 	}), cache.Options{SourceTimeout: 2 * time.Second})
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		value, err := g.GetLocal(r.Context(), "key")
+		value, err := g.Get(r.Context(), "key")
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return

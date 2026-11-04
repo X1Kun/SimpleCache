@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -19,12 +19,11 @@ const apiReadTimeout = 1500 * time.Millisecond
 
 type APIOptions struct {
 	Store               MutableSource
-	Router              *peer.Router
+	Directory           *cluster.Directory
 	Token               string
 	Lifecycle           context.Context
 	MaxConcurrentWrites int
 	writeSlots          chan struct{}
-	DirectReads         bool
 	NodeID              string
 }
 
@@ -42,7 +41,7 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 		panic("write concurrency must be positive")
 	}
 	opts.writeSlots = make(chan struct{}, opts.MaxConcurrentWrites)
-	writable := opts.Store != nil && opts.Router != nil && opts.Token != ""
+	writable := opts.Store != nil && opts.Directory != nil && opts.Token != ""
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) {
@@ -83,22 +82,18 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), apiReadTimeout)
 		defer cancel()
-		key, keyErr := requestKey(r, opts.DirectReads)
+		key, keyErr := requestKey(r)
 		if keyErr != nil {
 			http.Error(w, keyErr.Error(), http.StatusBadRequest)
 			return
 		}
-		get := group.Get
-		if opts.DirectReads {
-			get = group.GetDirect
-		}
-		value, err := get(ctx, key)
+		value, err := group.Get(ctx, key)
 		result = cache.Result(err)
 		if err != nil {
 			if errors.Is(err, cache.ErrOverloaded) {
 				w.Header().Set("Retry-After", "1")
 			}
-			http.Error(w, err.Error(), peer.Status(err))
+			http.Error(w, err.Error(), cluster.Status(err))
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -107,7 +102,7 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 		}
 		_, _ = value.WriteTo(w)
 	})
-	if opts.Router != nil && opts.Token != "" {
+	if opts.Directory != nil && opts.Token != "" {
 		mux.HandleFunc("/invalidate", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
 				w.Header().Set("Allow", "POST")
@@ -129,13 +124,10 @@ func APIHandler(group *cache.Group, ready func() bool, metrics *telemetry.Metric
 
 // Envoy hashes the wire query value. Accept exactly one canonical representation
 // so percent-encoding aliases, duplicate parameters and '+' cannot split one
-// decoded source key across cache shards. Legacy Peer mode keeps its old API.
-func requestKey(r *http.Request, canonical bool) (string, error) {
-	if !canonical {
-		return r.URL.Query().Get("key"), nil
-	}
+// decoded source key across cache shards. All public reads use this canonical API.
+func requestKey(r *http.Request) (string, error) {
 	values, err := url.ParseQuery(r.URL.RawQuery)
-	bad := errors.New("gateway mode requires one canonical key query: percent-encoded UTF-8, uppercase escapes, %20 for spaces")
+	bad := errors.New("requires one canonical key query: percent-encoded UTF-8, uppercase escapes, %20 for spaces")
 	if err != nil || len(values) != 1 || len(values["key"]) != 1 {
 		return "", bad
 	}

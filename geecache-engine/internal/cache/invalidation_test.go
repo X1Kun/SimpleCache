@@ -43,7 +43,7 @@ func TestInvalidatingOtherStripeDoesNotDiscardInFlightFill(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			done := make(chan error, 1)
-			go func() { _, err := g.GetLocal(ctx, key); done <- err }()
+			go func() { _, err := g.Get(ctx, key); done <- err }()
 			select {
 			case <-started:
 			case <-ctx.Done():
@@ -56,7 +56,7 @@ func TestInvalidatingOtherStripeDoesNotDiscardInFlightFill(t *testing.T) {
 			if err := <-done; err != nil {
 				t.Fatal(err)
 			}
-			if _, err := g.GetLocal(ctx, key); err != nil {
+			if _, err := g.Get(ctx, key); err != nil {
 				t.Fatal(err)
 			}
 			expected := int32(1)
@@ -71,8 +71,8 @@ func TestInvalidatingOtherStripeDoesNotDiscardInFlightFill(t *testing.T) {
 }
 
 func TestInvalidationSeparatesFlightsAndBlocksStaleFill(t *testing.T) {
-	for _, local := range []bool{false, true} {
-		name := "routed"
+	for _, local := range []bool{true} {
+		name := "local"
 		if local {
 			name = "local"
 		}
@@ -91,10 +91,10 @@ func TestInvalidationSeparatesFlightsAndBlocksStaleFill(t *testing.T) {
 					}
 				}
 				return []byte("new"), nil
-			}), Options{SourceTimeout: 3 * time.Second, RouteTimeout: 4 * time.Second})
+			}), Options{SourceTimeout: 3 * time.Second})
 			get := g.Get
 			if local {
-				get = g.GetLocal
+				get = g.Get
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -126,56 +126,6 @@ func TestInvalidationSeparatesFlightsAndBlocksStaleFill(t *testing.T) {
 				t.Fatalf("stale fill or unnecessary reload: %q %v calls=%d", v.String(), err, calls.Load())
 			}
 		})
-	}
-}
-
-type delayedPeer struct {
-	started chan struct{}
-	release chan struct{}
-	calls   atomic.Int32
-}
-
-func (p *delayedPeer) PickPeer(string) (PeerGetter, bool) { return p, true }
-func (p *delayedPeer) Get(ctx context.Context, _, _ string) ([]byte, error) {
-	if p.calls.Add(1) == 1 {
-		close(p.started)
-		select {
-		case <-p.release:
-			return []byte("old"), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	return []byte("new"), nil
-}
-
-func TestInvalidationDetachesOldRemoteFlight(t *testing.T) {
-	p := &delayedPeer{started: make(chan struct{}), release: make(chan struct{}, 1)}
-	defer close(p.release)
-	g := NewGroup("remote", 1024, GetterFunc(func(context.Context, string) ([]byte, error) {
-		return []byte("unexpected fallback"), nil
-	}), Options{Peers: p, RouteTimeout: 3 * time.Second})
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { _, err := g.Get(ctx, "key"); done <- err }()
-	select {
-	case <-p.started:
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
-	if err := g.Invalidate("key"); err != nil {
-		t.Fatal(err)
-	}
-	fresh, stop := context.WithTimeout(ctx, time.Second)
-	v, err := g.Get(fresh, "key")
-	stop()
-	if err != nil || v.String() != "new" || g.Stats().Entries != 0 {
-		t.Fatalf("remote flight isolation: %q %v %+v", v.String(), err, g.Stats())
-	}
-	p.release <- struct{}{}
-	if err := <-done; err != nil {
-		t.Fatal(err)
 	}
 }
 

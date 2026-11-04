@@ -41,9 +41,6 @@ func (g *Group) knownVersionLocked(key string) int64 {
 		version = e.Value.(versionRecord).version
 	}
 	version = max(version, g.mainCache.version(key))
-	if g.opts.HotCacheBytes > 0 {
-		version = max(version, g.hotCache.version(key))
-	}
 	return version
 }
 
@@ -108,9 +105,6 @@ func (g *Group) InvalidateVersion(key string, version int64) error {
 	if version == 0 || g.mainCache.version(key) < minimum {
 		g.mainCache.remove(key)
 	}
-	if g.opts.HotCacheBytes > 0 && (version == 0 || g.hotCache.version(key) < minimum) {
-		g.hotCache.remove(key)
-	}
 
 	g.epochMu.Unlock()
 	g.observe("invalidate", "ok", 0)
@@ -127,33 +121,9 @@ func (g *Group) readBarrier(key string) readFence {
 }
 
 // Invalidate removes a local copy and separates subsequent callers from both
-// old routing and old source flights. It never changes the source or forwards.
+// old source flights. It never changes the source or forwards.
 func (g *Group) Invalidate(key string) error {
 	return g.InvalidateVersion(key, 0)
-}
-
-// acceptPeer validates known source versions even when hot caching is disabled.
-// Unknown/older Peer data falls back to the primary source through Get.
-func (g *Group) acceptPeer(key string, value ByteView, fence readFence) error {
-	g.epochMu.Lock()
-	if value.Version() < max(fence.minimum, g.knownVersionLocked(key)) {
-		g.epochMu.Unlock()
-		g.observe("version_rejected", "peer", 0)
-		return ErrStaleVersion
-	}
-	eligible := g.opts.HotCacheBytes > 0 && value.RemainingTTL() > 0 && int64(len(key)+value.Len()) <= g.opts.HotCacheBytes
-	valid := fence.epoch == g.epochs[g.epochBucket(key)]
-	if eligible && valid {
-		if value.Version() > g.mainCache.version(key) {
-			g.mainCache.remove(key)
-		}
-		g.hotCache.add(key, value, g.opts.HotTTL)
-	}
-	g.epochMu.Unlock()
-	if eligible && !valid {
-		g.observe("discard_hot", "epoch_changed", 0)
-	}
-	return nil
 }
 
 func (g *Group) currentEpoch(key string) uint64 {

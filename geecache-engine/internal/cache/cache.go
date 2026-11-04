@@ -116,9 +116,6 @@ type Stats struct {
 	Capacity         int64  `json:"capacity_bytes"`
 	Entries          int    `json:"entries"`
 	Removals         uint64 `json:"removals"`
-	HotBytes         int64  `json:"hot_bytes"`
-	HotCapacity      int64  `json:"hot_capacity_bytes"`
-	HotEntries       int    `json:"hot_entries"`
 }
 
 func (c *cache) stats() Stats {
@@ -168,9 +165,6 @@ type cleanupObserver interface {
 // It does not change source versions, local epochs or key ownership.
 func (g *Group) CleanExpired() {
 	areas := []*cache{&g.mainCache}
-	if g.opts.HotCacheBytes > 0 {
-		areas = append(areas, &g.hotCache)
-	}
 	for _, area := range areas {
 		start := time.Now()
 		checked, removed, busy := area.cleanExpired(g.opts.CleanupBatch)

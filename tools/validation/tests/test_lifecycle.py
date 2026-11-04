@@ -189,6 +189,7 @@ class LifecycleTest(unittest.TestCase):
                 context.forward = lambda *args: contextlib.nullcontext('http://proxy')
                 context.proxies_healthy = lambda *args: True
                 context.worker_metrics = lambda label: 0
+                context.request = lambda *args, **kwargs: (405, {}, "method not allowed")
                 commands = []
                 def run(args, **kwargs):
                     commands.append(args)

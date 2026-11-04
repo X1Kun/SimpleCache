@@ -75,10 +75,10 @@ func TestRejectMethodBeforeCallingSource(t *testing.T) {
 	}
 }
 
-func TestGatewayCanonicalKeyAndDirectReads(t *testing.T) {
+func TestCanonicalAPIKey(t *testing.T) {
 	calls := 0
 	g := cache.NewGroup(t.Name(), 1024, cache.GetterFunc(func(_ context.Context, key string) ([]byte, error) { calls++; return []byte(key), nil }), cache.Options{})
-	handler := APIHandler(g, func() bool { return true }, nil, APIOptions{DirectReads: true, NodeID: "demo/cache-0"})
+	handler := APIHandler(g, func() bool { return true }, nil, APIOptions{NodeID: "demo/cache-0"})
 	for _, query := range []string{"key=plain", "key=product%3A42", "key=a%20b", "key=%E4%B8%AD%E6%96%87", "key=a%2Bb", "key=a~b"} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", "/api?"+query, nil))

@@ -20,8 +20,8 @@ func (o *cleanupEvents) Cleanup(int, int, time.Duration, bool) {
 }
 
 func TestCleanupReclaimsExpiredCopiesWithoutSourceOrEpochChanges(t *testing.T) {
-	g := NewGroup("cleanup", 1024, GetterFunc(func(context.Context, string) ([]byte, error) { t.Error("cleanup queried source"); return nil, nil }), Options{HotCacheBytes: 128, CleanupBatch: 1})
-	for _, c := range []*cache{&g.mainCache, &g.hotCache} {
+	g := NewGroup("cleanup", 1024, GetterFunc(func(context.Context, string) ([]byte, error) { t.Error("cleanup queried source"); return nil, nil }), Options{CleanupBatch: 1})
+	for _, c := range []*cache{&g.mainCache} {
 		c.lru = lru.New(c.cacheBytes, func(string, lru.Value) { c.evictions++ })
 		c.lru.AddUntil("expired", ByteView{b: []byte("old"), version: 1}, time.Now().Add(-time.Second))
 		c.lru.AddUntil("live", ByteView{b: []byte("new"), version: 2}, time.Now().Add(time.Hour))
@@ -29,10 +29,10 @@ func TestCleanupReclaimsExpiredCopiesWithoutSourceOrEpochChanges(t *testing.T) {
 	epoch := g.currentEpoch("expired")
 	g.CleanExpired()
 	s := g.Stats()
-	if s.Entries != 2 || s.Removals != 2 || g.currentEpoch("expired") != epoch {
+	if s.Entries != 1 || s.Removals != 1 || g.currentEpoch("expired") != epoch {
 		t.Fatal("cleanup accounting/fencing mismatch", s)
 	}
-	for _, c := range []*cache{&g.mainCache, &g.hotCache} {
+	for _, c := range []*cache{&g.mainCache} {
 		v, ok := c.get("live")
 		if !ok || v.Version() != 2 || v.String() != "new" {
 			t.Fatal("cleanup damaged live value")

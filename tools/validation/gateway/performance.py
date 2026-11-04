@@ -139,7 +139,7 @@ def resources(path):
 
 def cache_metrics(m: GatewayRun, label):
     result = {}
-    names = ['simplecache_source_loads_total', 'simplecache_peer_requests_total', 'process_cpu_seconds_total',
+    names = ['simplecache_source_loads_total', 'process_cpu_seconds_total',
              'process_resident_memory_bytes', 'go_memstats_alloc_bytes_total', 'process_start_time_seconds',
              'simplecache_source_write_duration_seconds_count', 'simplecache_source_write_duration_seconds_sum',
              'simplecache_invalidation_broadcast_duration_seconds_count', 'simplecache_invalidation_broadcast_duration_seconds_sum',
@@ -151,7 +151,6 @@ def cache_metrics(m: GatewayRun, label):
                 text = response.read().decode()
         (m.report / (label+'-'+pod['metadata']['name']+'.prom')).write_text(text)
         values = {name: metric(text, name) for name in names}
-        assert values['simplecache_peer_requests_total'] == 0, 'comparison accidentally used Peer forwarding'
         result[pod['metadata']['name']] = {'uid': pod['metadata']['uid'], 'values': values}
     return result
 

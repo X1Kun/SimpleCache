@@ -9,13 +9,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 )
 
 func notifyVersion(handler http.Handler, version string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest("POST", "/invalidate?key=key", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
-	req.Header.Set(peer.InvalidationVersionHeader, version)
+	req.Header.Set(cluster.InvalidationVersionHeader, version)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 	return w
@@ -23,7 +23,7 @@ func notifyVersion(handler http.Handler, version string) *httptest.ResponseRecor
 
 func TestDirectReadVersionedInvalidationLifecycleAndOutOfOrderDelivery(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
-	nodes := productClusterWithRouting(t, store, 0, true)
+	nodes := productCluster(t, store)
 	warm := func(version int64) {
 		t.Helper()
 		for _, node := range nodes {
@@ -79,8 +79,8 @@ func TestDirectReadVersionedInvalidationLifecycleAndOutOfOrderDelivery(t *testin
 
 func TestInvalidationVersionCannotBeInjectedIntoWritesOrMalformedNotifications(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
-	nodes := productClusterWithRouting(t, store, 0, true)
-	_, _ = nodes[0].group.GetDirect(context.Background(), "key")
+	nodes := productCluster(t, store)
+	_, _ = nodes[0].group.Get(context.Background(), "key")
 	for _, value := range []string{"", "0", "-1", "01", "2,3", "9223372036854775808"} {
 		if w := notifyVersion(nodes[0].api, value); w.Code != 400 || nodes[0].group.Stats().Entries != 1 {
 			t.Fatal("malformed notification changed cache", value, w.Code)
@@ -89,7 +89,7 @@ func TestInvalidationVersionCannotBeInjectedIntoWritesOrMalformedNotifications(t
 	req := httptest.NewRequest("PUT", "/api?key=key", strings.NewReader(`{"v":99}`))
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("If-Match", `"v1"`)
-	req.Header.Set(peer.InvalidationVersionHeader, "999")
+	req.Header.Set(cluster.InvalidationVersionHeader, "999")
 	w := httptest.NewRecorder()
 	nodes[0].api.ServeHTTP(w, req)
 	if w.Code != 400 || store.versionLocked("key") != 1 {
@@ -99,11 +99,11 @@ func TestInvalidationVersionCannotBeInjectedIntoWritesOrMalformedNotifications(t
 
 func TestCommittedVersionIsPartialWhenPeerHasOnlyLegacyInvalidation(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
-	nodes := productClusterWithRouting(t, store, 0, true)
+	nodes := productCluster(t, store)
 	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) }))
 	defer old.Close()
 	members := nodes[0].router.Members()
-	members = append(members, peer.Member{ID: "old", Address: strings.TrimPrefix(old.URL, "http://")})
+	members = append(members, cluster.Member{ID: "old", Address: strings.TrimPrefix(old.URL, "http://")})
 	if e := nodes[0].router.Update(members); e != nil {
 		t.Fatal(e)
 	}
@@ -134,9 +134,9 @@ func (s invalidCommitVersion) PutIfVersion(ctx context.Context, key string, valu
 }
 func TestInvalidCommitVersionRemainsUnknownAndUsesForceInvalidation(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
-	nodes := productClusterWithRouting(t, invalidCommitVersion{store}, 0, true)
+	nodes := productCluster(t, invalidCommitVersion{store})
 	for _, node := range nodes {
-		_, _ = node.group.GetDirect(context.Background(), "key")
+		_, _ = node.group.Get(context.Background(), "key")
 	}
 	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token", `"v1"`)
 	var response mutationResponse
@@ -150,7 +150,7 @@ func TestInvalidCommitVersionRemainsUnknownAndUsesForceInvalidation(t *testing.T
 		if node.group.Stats().Entries != 0 {
 			t.Fatal("ambiguous source write did not force invalidate")
 		}
-		if v, e := node.group.GetDirect(context.Background(), "key"); e != nil || v.Version() != 2 {
+		if v, e := node.group.Get(context.Background(), "key"); e != nil || v.Version() != 2 {
 			t.Fatal(v, e)
 		}
 	}

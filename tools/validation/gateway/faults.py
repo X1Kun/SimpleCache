@@ -73,7 +73,6 @@ def metrics(m: GatewayRun, label):
             with urllib.request.urlopen(base + '/metrics', timeout=5) as response:
                 text = response.read().decode()
         (m.report / (label + '-' + pod['metadata']['name'] + '.prom')).write_text(text)
-        assert metric(text, 'simplecache_peer_requests_total') == 0, 'normal reads forwarded to Peer'
         result[pod['metadata']['name']] = {
             'uid': pod['metadata']['uid'], 'process_start': metric(text, 'process_start_time_seconds'),
             'source': metric(text, 'simplecache_source_loads_total'),
@@ -181,7 +180,7 @@ def partial_delivery(m: GatewayRun, bases):
     fault = {'apiVersion': 'discovery.k8s.io/v1', 'kind': 'EndpointSlice',
              'metadata': {'name': name, 'labels': {'kubernetes.io/service-name': 'products-svc',
                                                 'endpointslice.kubernetes.io/managed-by': 'simplecache-experiment'}},
-             'addressType': 'IPv4', 'ports': [{'name': 'peer', 'port': 8001, 'protocol': 'TCP'}],
+             'addressType': 'IPv4', 'ports': [{'name': 'cluster', 'port': 8001, 'protocol': 'TCP'}],
              'endpoints': [{'addresses': [address], 'conditions': {'ready': True},
                             'targetRef': {'kind': 'Pod', 'name': 'postgres', 'namespace': 'default'}}]}
     m.apply(fault)

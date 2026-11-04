@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/demo"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/discovery"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/outbox"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 	"k8s.io/client-go/kubernetes"
@@ -22,12 +22,12 @@ import (
 )
 
 const (
-	peerReadTimeout       = time.Second
-	sourceStartupTimeout  = 5 * time.Second
-	readHeaderTimeout     = 3 * time.Second
-	requestReadTimeout    = 5 * time.Second
-	connectionIdleTimeout = 30 * time.Second
-	shutdownGracePeriod   = 5 * time.Second
+	invalidationRequestTimeout = time.Second
+	sourceStartupTimeout       = 5 * time.Second
+	readHeaderTimeout          = 3 * time.Second
+	requestReadTimeout         = 5 * time.Second
+	connectionIdleTimeout      = 30 * time.Second
+	shutdownGracePeriod        = 5 * time.Second
 )
 
 // Covers the 5s request-body read and bounded mutation work.
@@ -68,15 +68,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	// The signal context controls shutdown; in-flight work survives the grace period.
 	work, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if c.ReadRoutingMode == "" {
-		c.ReadRoutingMode = "peer"
-	}
-	var router *peer.Router
-	if c.ReadRoutingMode == "gateway" {
-		router = peer.NewDirectory(c.SelfID, peerReadTimeout, c.AdminToken)
-	} else {
-		router = peer.NewRouterWithToken(c.SelfID, peerReadTimeout, c.AdminToken)
-	}
+	router := cluster.NewDirectory(c.SelfID, invalidationRequestTimeout, c.AdminToken)
 	defer router.Close()
 	if err := router.Update(c.Members); err != nil {
 		return err
@@ -94,8 +86,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		groupName = "products"
 	}
 	group := cache.NewGroup(groupName, c.CacheBytes, source, cache.Options{
-		TTL: c.TTL, KnownKeys: knownKeys, Peers: router, Lifecycle: work, Limiter: cache.NewSourceLimiterWithQueue(c.SourceConcurrency, c.SourceMaxPending), Observer: metrics,
-		HotCacheBytes:  c.HotCacheBytes,
+		TTL: c.TTL, KnownKeys: knownKeys, Lifecycle: work, Limiter: cache.NewSourceLimiterWithQueue(c.SourceConcurrency, c.SourceMaxPending), Observer: metrics,
 		MaxMissWaiters: c.MaxMissWaiters,
 	})
 	metrics.ObserveCache(group)
@@ -109,7 +100,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		if err != nil {
 			return err
 		}
-		watcher, err = discovery.New(client, c.Namespace, c.PeerService, router)
+		watcher, err = discovery.New(client, c.Namespace, c.ClusterService, router)
 		if err != nil {
 			return err
 		}
@@ -120,9 +111,9 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	}
 	var serving atomic.Bool
 	ready := func() bool { return serving.Load() && (watcher == nil || watcher.Ready()) }
-	servers := []*http.Server{newDataServer(c.PeerAddr, peer.NewHandlerWithToken(c.AdminToken, group))}
+	servers := []*http.Server{newDataServer(c.ClusterAddr, cluster.NewHandlerWithToken(c.AdminToken, group))}
 	if c.API {
-		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Router: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency, DirectReads: c.ReadRoutingMode == "gateway", NodeID: c.SelfID})
+		api := APIHandler(group, ready, metrics, APIOptions{Store: mutable, Directory: router, Token: c.AdminToken, Lifecycle: work, MaxConcurrentWrites: c.WriteConcurrency, NodeID: c.SelfID})
 		servers = append(servers, newDataServer(c.APIAddr, api))
 	}
 	if c.DebugAddr != "" {
@@ -140,7 +131,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	if queue, ok := source.(outbox.Queue); ok && c.AdminToken != "" {
 		relayCtx, stopRelay := context.WithCancel(work)
 		relayDone := make(chan struct{})
-		defer func() { stopRelay(); <-relayDone }() // Join before Router/Store are closed.
+		defer func() { stopRelay(); <-relayDone }() // Join before Directory/Store are closed.
 		relay := outbox.Worker{Queue: queue, Observer: metrics, Send: outboxSender(ready, group, router)}
 		go func() { defer close(relayDone); relay.Run(relayCtx) }()
 	}
@@ -151,7 +142,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		defer runtime.SetMutexProfileFraction(previous)
 		defer runtime.SetBlockProfileRate(0)
 	}
-	addresses := map[string]string{"peer": listeners[0].Addr().String()}
+	addresses := map[string]string{"cluster": listeners[0].Addr().String()}
 	if c.API {
 		addresses["api"] = listeners[1].Addr().String()
 	}
@@ -164,7 +155,7 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 
 // A relay can finish only a successful nonempty captured membership snapshot.
 // Readiness alone can legitimately have an empty discovery view during startup.
-func outboxSender(ready func() bool, group *cache.Group, router *peer.Router) outbox.Sender {
+func outboxSender(ready func() bool, group *cache.Group, router *cluster.Directory) outbox.Sender {
 	return func(ctx context.Context, event outbox.Event) error {
 		if !ready() {
 			return errors.New("outbox discovery not ready")

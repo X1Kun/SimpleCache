@@ -16,7 +16,7 @@ x-env: &env
   CACHE_ADMIN_TOKEN: ${CACHE_ADMIN_TOKEN:-learning-only-token}
   CACHE_BYTES: "16777216"
   TTL_SECONDS: "60"
-  PEERS: http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
+  MEMBERS: http://cache-1:8001,http://cache-2:8001,http://cache-3:8001
 
 services:
   postgres:

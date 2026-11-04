@@ -76,7 +76,7 @@ func (r *SimpleCacheReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, r.setStatus(ctx, &cr, 0, metav1.ConditionFalse, "GatewayUnavailable", err.Error())
 		}
 	}
-	objects := []client.Object{account(desired), discoveryRole(desired), discoveryBinding(desired), peerService(desired), apiService(desired), statefulSet(desired)}
+	objects := []client.Object{account(desired), discoveryRole(desired), discoveryBinding(desired), clusterService(desired), apiService(desired), statefulSet(desired)}
 	for _, wanted := range objects {
 		if err := r.ensure(ctx, &cr, wanted); err != nil {
 			reason := "ReconcileFailed"

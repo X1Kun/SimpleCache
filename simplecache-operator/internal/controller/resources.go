@@ -44,10 +44,10 @@ func labels(cr *cachev1.SimpleCache) map[string]string { return map[string]strin
 func metadata(cr *cachev1.SimpleCache, name string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{Name: name, Namespace: cr.Namespace}
 }
-func peerService(cr *cachev1.SimpleCache) *corev1.Service {
+func clusterService(cr *cachev1.SimpleCache) *corev1.Service {
 	return &corev1.Service{ObjectMeta: metadata(cr, cr.Name+"-svc"), Spec: corev1.ServiceSpec{
 		Type: corev1.ServiceTypeClusterIP, ClusterIP: corev1.ClusterIPNone, Selector: labels(cr),
-		Ports: []corev1.ServicePort{{Name: "peer", Port: 8001, TargetPort: intstr.FromInt32(8001), Protocol: corev1.ProtocolTCP}},
+		Ports: []corev1.ServicePort{{Name: "cluster", Port: 8001, TargetPort: intstr.FromInt32(8001), Protocol: corev1.ProtocolTCP}},
 	}}
 }
 func apiService(cr *cachev1.SimpleCache) *corev1.Service {
@@ -79,16 +79,12 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		{Name: "POD_NAME", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.name"}}},
 		{Name: "POD_NAMESPACE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"}}},
 		{Name: "DISCOVERY_MODE", Value: "kubernetes"},
-		{Name: "PEER_SERVICE", Value: cr.Name + "-svc"},
+		{Name: "CLUSTER_SERVICE", Value: cr.Name + "-svc"},
 		{Name: "CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.CacheBytes, 10)},
-		{Name: "HOT_CACHE_BYTES", Value: strconv.FormatInt(cr.Spec.HotCacheBytes, 10)},
 		{Name: "TTL_SECONDS", Value: strconv.Itoa(int(cr.Spec.TTLSeconds))},
 		{Name: "MAX_MISS_WAITERS", Value: strconv.Itoa(int(cr.Spec.MaxMissWaiters))},
 		{Name: "SOURCE_MAX_PENDING", Value: strconv.Itoa(int(pending))},
 		{Name: "WRITE_MAX_CONCURRENCY", Value: strconv.Itoa(int(cr.Spec.MaxConcurrentWrites))},
-	}
-	if cr.Spec.Gateway != nil {
-		env = append(env, corev1.EnvVar{Name: "READ_ROUTING_MODE", Value: "gateway"})
 	}
 	if cr.Spec.SourceSecret != "" {
 		env = append(env, corev1.EnvVar{Name: "SOURCE_MODE", Value: "postgres"})
@@ -116,7 +112,7 @@ func statefulSet(cr *cachev1.SimpleCache) *appsv1.StatefulSet {
 		}}, Spec: corev1.PodSpec{ServiceAccountName: cr.Name + "-cache", TerminationGracePeriodSeconds: &grace,
 			Containers: []corev1.Container{{Name: "cache", Image: cr.Spec.Image, ImagePullPolicy: corev1.PullIfNotPresent,
 				Command: []string{"./geecache-server", "-port=8001", "-api=true"},
-				Ports:   []corev1.ContainerPort{{Name: "peer", ContainerPort: 8001, Protocol: corev1.ProtocolTCP}, {Name: "api", ContainerPort: 9999, Protocol: corev1.ProtocolTCP}},
+				Ports:   []corev1.ContainerPort{{Name: "cluster", ContainerPort: 8001, Protocol: corev1.ProtocolTCP}, {Name: "api", ContainerPort: 9999, Protocol: corev1.ProtocolTCP}},
 				Env:     env, Resources: resources, StartupProbe: startup, LivenessProbe: probe("/healthz"), ReadinessProbe: probe("/readyz"),
 			}},
 		}},

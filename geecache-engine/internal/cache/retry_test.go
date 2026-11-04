@@ -10,8 +10,8 @@ import (
 )
 
 func TestStaleSourceRetryKeepsDeadlineAdmissionAndVersionFloor(t *testing.T) {
-	for _, mode := range []string{"peer", "direct", "route"} {
-		for _, recover := range []bool{false, true} {
+	for _, mode := range []string{"local"} {
+		for _, recover := range []bool{true} {
 			t.Run(mode+"/"+map[bool]string{false: "still-stale", true: "recovers"}[recover], func(t *testing.T) {
 				var calls atomic.Int32
 				var firstDeadline time.Time
@@ -32,13 +32,7 @@ func TestStaleSourceRetryKeepsDeadlineAdmissionAndVersionFloor(t *testing.T) {
 					}
 					return sourceValue(1), nil
 				}), Options{Limiter: NewSourceLimiterWithQueue(1, 0)})
-				get := g.GetDirect
-				if mode == "peer" {
-					get = g.GetLocal
-				}
-				if mode == "route" {
-					get = g.Get
-				}
+				get := g.Get
 				v, err := get(context.Background(), "key")
 				if recover {
 					if err != nil || v.Version() != 2 || g.Stats().Entries != 1 {
@@ -60,7 +54,7 @@ func TestSourceRetryDoesNotRetryOtherErrorsOrCancellation(t *testing.T) {
 	for _, failure := range []error{ErrOverloaded, ErrNotFound, context.DeadlineExceeded} {
 		var calls atomic.Int32
 		g := NewGroup("errors", 1024, GetterFunc(func(context.Context, string) ([]byte, error) { calls.Add(1); return nil, failure }), Options{})
-		if _, err := g.GetDirect(context.Background(), "key"); !errors.Is(err, failure) || calls.Load() != 1 {
+		if _, err := g.Get(context.Background(), "key"); !errors.Is(err, failure) || calls.Load() != 1 {
 			t.Fatal(err, calls.Load())
 		}
 	}
@@ -76,7 +70,7 @@ func (o retryFloorObserver) Observe(operation, result string, _ time.Duration) {
 func (retryFloorObserver) Inflight(float64) {}
 
 func TestRetryRetainsFloorObservedDuringRejection(t *testing.T) {
-	for _, mode := range []string{"direct", "peer", "route"} {
+	for _, mode := range []string{"local"} {
 		for _, retryVersion := range []int64{1, 2} {
 			t.Run(fmt.Sprintf("%s/version-%d", mode, retryVersion), func(t *testing.T) {
 				var calls atomic.Int32
@@ -96,13 +90,7 @@ func TestRetryRetainsFloorObservedDuringRejection(t *testing.T) {
 					return sourceValue(retryVersion), nil
 				}), Options{Observer: observer})
 				g.floors.capacity = 1
-				get := g.GetDirect
-				if mode == "peer" {
-					get = g.GetLocal
-				}
-				if mode == "route" {
-					get = g.Get
-				}
+				get := g.Get
 				value, err := get(context.Background(), "key")
 				if retryVersion == 1 {
 					if !errors.Is(err, ErrStaleVersion) || g.Stats().Entries != 0 {

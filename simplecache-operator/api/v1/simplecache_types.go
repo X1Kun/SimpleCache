@@ -24,7 +24,7 @@ import (
 // SimpleCacheSpec describes the desired read-cache cluster.
 type SimpleCacheSpec struct {
 	// Gateway enables direct key routing through an installed Envoy Gateway.
-	// Omit to retain Peer routing. Requires the controller's --enable-gateway flag.
+	// Without a Gateway replicas are independent local caches. Requires the controller's --enable-gateway flag.
 	// +optional
 	Gateway *GatewaySpec `json:"gateway,omitempty"`
 	// +kubebuilder:default=3
@@ -45,18 +45,12 @@ type SimpleCacheSpec struct {
 	// +kubebuilder:validation:Maximum=134217728
 	// +optional
 	CacheBytes int64 `json:"cacheBytes,omitempty"`
-	// HotCacheBytes reserves part of CacheBytes for remote read replicas.
-	// Zero disables hot caching; replicas have at most a one-second local TTL.
-	// +kubebuilder:validation:Minimum=0
-	// +kubebuilder:validation:Maximum=134217727
-	// +optional
-	HotCacheBytes int64 `json:"hotCacheBytes,omitempty"`
 	// +kubebuilder:default=60
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600
 	// +optional
 	TTLSeconds int32 `json:"ttlSeconds,omitempty"`
-	// MaxMissWaiters bounds each API/Peer miss-waiter lane and shared route tasks.
+	// MaxMissWaiters bounds API miss waiters.
 	// Cache hits and probes do not acquire these slots.
 	// +kubebuilder:default=128
 	// +kubebuilder:validation:Minimum=1

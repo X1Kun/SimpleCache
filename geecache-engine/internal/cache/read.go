@@ -4,31 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
-	"time"
-
 	"golang.org/x/sync/singleflight"
+	"strconv"
 )
-
-// readEntry describes admission/metrics ownership, not the routing mode.
-type readEntry uint8
-
-const (
-	readFallback readEntry = iota // Outer Get already admitted this request; do not acquire another waiter slot.
-	readAPI
-	readPeer
-)
-
-func (entry readEntry) label() string {
-	switch entry {
-	case readAPI:
-		return "api"
-	case readPeer:
-		return "peer"
-	default:
-		return ""
-	}
-}
 
 func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -39,12 +17,6 @@ func (g *Group) lookup(ctx context.Context, key string) (ByteView, bool, error) 
 	}
 	if v, ok := g.mainCache.get(key); ok {
 		return v, true, nil
-	}
-	if g.opts.HotCacheBytes > 0 {
-		if v, ok := g.hotCache.get(key); ok {
-			g.observe("hot_hit", "ok", 0)
-			return v, true, nil
-		}
 	}
 	if g.bloom != nil && !g.bloom.Contains(key) {
 		g.observe("bloom", "rejected", 0)
@@ -78,7 +50,8 @@ func await(ctx context.Context, result <-chan singleflight.Result) (ByteView, er
 	}
 }
 
-// Get routes at most once. Caller cancellation stops waiting, not shared work.
+// Get loads locally; Gateway owns distributed key routing. Caller cancellation
+// stops waiting without canceling shared bounded source work.
 func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	v, hit, err := g.lookup(ctx, key)
 	lookupResult := "miss"
@@ -94,80 +67,6 @@ func (g *Group) Get(ctx context.Context, key string) (ByteView, error) {
 	}
 	defer func() { <-g.apiWaiters }()
 	fence := g.readBarrier(key)
-	result := g.routeFlight.DoChan(flightKey(fence, key), func() (any, error) {
-		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.RouteTimeout)
-		defer cancel()
-		if v, hit, err := g.lookupAtLeast(work, key, fence.minimum); hit || err != nil {
-			return v, err
-		}
-		// Shared routing outlives canceled callers, so it needs its own bound.
-		// Acquire inside the flight: same-key waiters never each take a slot.
-		if !g.admit(g.routeTasks, "route_task") {
-			return ByteView{}, ErrOverloaded
-		}
-		defer func() { <-g.routeTasks }()
-		if g.opts.Peers != nil {
-			if peer, ok := g.opts.Peers.PickPeer(key); ok {
-				view, err := g.readFromPeer(work, key, peer, fence)
-				if err == nil {
-					return view, nil
-				}
-				if errors.Is(err, ErrNotFound) && max(fence.minimum, g.knownVersion(key)) == 0 {
-					return ByteView{}, err
-				}
-				if errors.Is(err, ErrOverloaded) {
-					return ByteView{}, err
-				}
-				if work.Err() != nil {
-					return ByteView{}, work.Err()
-				}
-				reason := "error"
-				if errors.Is(err, context.DeadlineExceeded) {
-					reason = "timeout"
-				}
-				g.observe("fallback", reason, 0)
-				// Transport, protocol and unknown-group failures fall back to the local source.
-			}
-		}
-		return g.getLocal(work, key, readFallback, fence.minimum)
-	})
-	return await(ctx, result)
-}
-
-// GetLocal never selects a peer. Source work has its own bounded lifecycle.
-func (g *Group) GetLocal(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, readPeer, 0)
-}
-
-// GetDirect is the public Gateway-mode read path: API admission and source
-// coalescing, with neither routeFlight nor an outgoing Peer request.
-func (g *Group) GetDirect(ctx context.Context, key string) (ByteView, error) {
-	return g.getLocal(ctx, key, readAPI, 0)
-}
-
-func (g *Group) getLocal(ctx context.Context, key string, entry readEntry, required int64) (ByteView, error) {
-	v, hit, err := g.lookupAtLeast(ctx, key, required)
-	if entry != readFallback {
-		result := "miss"
-		if hit {
-			result = "hit"
-		}
-		g.observe("lookup_"+entry.label(), result, 0)
-	}
-	if hit || err != nil {
-		return v, err
-	}
-	if entry != readFallback {
-		lane := g.peerWaiters
-		if entry == readAPI {
-			lane = g.apiWaiters
-		}
-		if !g.admit(lane, entry.label()+"_waiter") {
-			return ByteView{}, ErrOverloaded
-		}
-		defer func() { <-lane }()
-	}
-	fence := g.readBarrier(key).withMinimum(required)
 	result := g.originFlight.DoChan(flightKey(fence, key), func() (any, error) {
 		work, cancel := context.WithTimeout(g.opts.Lifecycle, g.opts.SourceTimeout)
 		defer cancel()
@@ -193,29 +92,4 @@ func (g *Group) getLocal(ctx context.Context, key string, entry readEntry, requi
 
 func flightKey(fence readFence, key string) string {
 	return strconv.FormatUint(fence.epoch, 10) + ":" + strconv.FormatInt(fence.minimum, 10) + ":" + key
-}
-
-// readFromPeer performs one transport read and guarded admission. Get owns
-// terminal-error classification and the decision to fall back to the source.
-func (g *Group) readFromPeer(work context.Context, key string, peer PeerGetter, fence readFence) (ByteView, error) {
-	start := time.Now()
-	var value PeerValue
-	var err error
-	if expiring, ok := peer.(ExpiringPeerGetter); ok {
-		value, err = expiring.GetWithExpiry(work, g.name, key)
-	} else {
-		value.Value, err = peer.Get(work, g.name, key)
-	}
-	g.observe("peer", Result(err), time.Since(start))
-	if err != nil {
-		return ByteView{}, err
-	}
-	if len(value.Value) > MaxValueBytes {
-		return ByteView{}, ErrValueTooLarge
-	}
-	view := ByteView{b: cloneBytes(value.Value), expiresAt: value.ExpiresAt, version: value.Version}
-	if err := g.acceptPeer(key, view, fence); err != nil {
-		return ByteView{}, err
-	}
-	return view, nil
 }

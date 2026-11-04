@@ -6,7 +6,7 @@ import (
 )
 
 // DebugHandler is served only by a separate, explicitly enabled loopback listener.
-// Neither public API nor peer handlers use DefaultServeMux.
+// Neither public API nor notification handlers use DefaultServeMux.
 func DebugHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /debug/pprof/{$}", pprof.Index)

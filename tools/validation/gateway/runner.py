@@ -55,7 +55,11 @@ def continue_retained_experiment(ctx, previous_name):
         continue_exercise(ctx, stack, bases, admins, remaining, [p['metadata']['uid'] for p in pods], old['phase'])
         ctx.phase('final-validation')
         ctx.worker_metrics('final')
-        ctx.check('gateway reads do not perform Peer forwarding', 'per-worker metrics captured')
+        for pod in ctx.obj('pods', selector='app=products')['items']:
+            with ctx.forward('default', 'pod/' + pod['metadata']['name'], 8001) as member:
+                assert ctx.request(member, 'item-1', path='/_geecache/products/item-1')[0] == 405
+                assert ctx.request(member, 'item-1', path='/_simplecache/invalidate/products/item-1')[0] == 405
+        ctx.check('local cache API and notification-only member transport', 'per-worker metrics captured')
     assert len(ctx.results['checks']) == 26, 'scenario coverage incomplete'
     ctx.snapshot('success')
     ctx.results['status'] = 'passed'
@@ -174,7 +178,11 @@ def run_suite(ctx):
             exercise(ctx, stack, bases, admins, remaining, [p['metadata']['uid'] for p in proxies])
         ctx.phase('final-validation')
         ctx.worker_metrics('final')
-        ctx.check('gateway reads do not perform Peer forwarding', 'per-worker metrics captured')
+        for pod in ctx.obj('pods', selector='app=products')['items']:
+            with ctx.forward('default', 'pod/' + pod['metadata']['name'], 8001) as member:
+                assert ctx.request(member, 'item-1', path='/_geecache/products/item-1')[0] == 405
+                assert ctx.request(member, 'item-1', path='/_simplecache/invalidate/products/item-1')[0] == 405
+        ctx.check('local cache API and notification-only member transport', 'per-worker metrics captured')
     assert len(ctx.results['checks']) == (26 if ctx.extended else 10), 'scenario coverage incomplete'
     ctx.snapshot('success')
     ctx.results['status'] = 'passed'

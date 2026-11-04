@@ -1,15 +1,12 @@
-package peer
+package cluster
 
 import (
-	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	pb "github.com/X1Kun/simpleCache/geecache-engine/internal/peer/peerpb"
-	"google.golang.org/protobuf/proto"
 )
 
 type Handler struct {
@@ -32,12 +29,8 @@ func NewHandlerWithToken(token string, groups ...*cache.Group) *Handler {
 	return h
 }
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && (r.Method != http.MethodDelete || h.token == "") {
-		allow := "GET"
-		if h.token != "" {
-			allow = "GET, DELETE"
-		}
-		w.Header().Set("Allow", allow)
+	if r.Method != http.MethodDelete || h.token == "" {
+		w.Header().Set("Allow", "DELETE")
 		http.Error(w, "method not allowed", 405)
 		return
 	}
@@ -52,7 +45,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	parts := strings.SplitN(strings.TrimPrefix(path, BasePath), "/", 2)
 	if len(parts) != 2 {
-		http.Error(w, "bad peer path", 400)
+		http.Error(w, "bad member path", 400)
 		return
 	}
 	group, e1 := url.PathUnescape(parts[0])
@@ -63,7 +56,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g, ok := h.groups[group]
 	if !ok {
-		w.Header().Set(ErrorHeader, "GROUP_NOT_FOUND")
+
 		http.Error(w, "group not found", 404)
 		return
 	}
@@ -82,35 +75,4 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	value, err := g.GetLocal(r.Context(), key)
-	if err != nil {
-		if errors.Is(err, cache.ErrNotFound) {
-			w.Header().Set(ErrorHeader, "KEY_NOT_FOUND")
-		}
-		if errors.Is(err, cache.ErrStaleVersion) {
-			w.Header().Set(ErrorHeader, "STALE_VERSION")
-		}
-		if errors.Is(err, cache.ErrOverloaded) {
-			w.Header().Set(ErrorHeader, "OVERLOADED")
-			w.Header().Set("Retry-After", "1")
-		}
-		http.Error(w, err.Error(), Status(err))
-		return
-	}
-	message := &pb.Response{Value: value.ByteSlice()}
-	if proto.Size(message) > MaxBodyBytes {
-		http.Error(w, "peer body too large", 500)
-		return
-	}
-	body, err := proto.Marshal(message)
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set(TTLHeader, strconv.FormatInt(int64(value.RemainingTTL()), 10))
-	if value.Version() > 0 {
-		w.Header().Set(VersionHeader, strconv.FormatInt(value.Version(), 10))
-	}
-	_, _ = w.Write(body)
 }

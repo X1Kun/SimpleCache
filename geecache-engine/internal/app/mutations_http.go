@@ -9,17 +9,17 @@ import (
 	"strings"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 )
 
 func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts APIOptions, metrics *telemetry.Metrics, invalidateOnly bool) (result string) {
 	result = "error"
-	if !peer.Authorized(r, opts.Token) {
+	if !cluster.Authorized(r, opts.Token) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	key, keyErr := requestKey(r, opts.DirectReads)
+	key, keyErr := requestKey(r)
 	if keyErr != nil {
 		http.Error(w, keyErr.Error(), http.StatusBadRequest)
 		return
@@ -28,7 +28,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	version, versionErr := peer.ParseInvalidationVersion(r.Header)
+	version, versionErr := cluster.ParseInvalidationVersion(r.Header)
 	if versionErr != nil {
 		http.Error(w, versionErr.Error(), http.StatusBadRequest)
 		return
@@ -99,7 +99,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 	if metrics != nil {
 		observer = metrics
 	}
-	outcome := executeMutation(opts.Lifecycle, group, opts.Store, opts.Router, command, observer)
+	outcome := executeMutation(opts.Lifecycle, group, opts.Store, opts.Directory, command, observer)
 	response, writeErr := outcome.response, outcome.writeErr
 	if errors.Is(writeErr, cache.ErrPreconditionFailed) {
 		w.Header().Set("Content-Type", "application/json")
@@ -108,7 +108,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		return "precondition_failed"
 	}
 	if outcome.broadcastErr != nil {
-		http.Error(w, outcome.broadcastErr.Error(), peer.Status(outcome.broadcastErr))
+		http.Error(w, outcome.broadcastErr.Error(), cluster.Status(outcome.broadcastErr))
 		return
 	}
 	report := response.Invalidation
@@ -117,7 +117,7 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 		status = http.StatusAccepted
 	}
 	if writeErr != nil {
-		status = peer.Status(writeErr)
+		status = cluster.Status(writeErr)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if writeErr == nil && r.Method == http.MethodPut && response.SourceVersion != nil {

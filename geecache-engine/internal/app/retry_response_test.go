@@ -24,7 +24,7 @@ func contractPath(key string) string { return "/api?" + url.Values{"key": {key}}
 // buffer. Only delivery is lost; this intentionally excludes the crash window.
 func checkLostWriteResponseRetry(t *testing.T, store MutableSource, key string, audit func()) {
 	t.Helper()
-	nodes := productClusterWithRouting(t, store, 0, true)
+	nodes := productCluster(t, store)
 	generated := make(chan *httptest.ResponseRecorder, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		buffered := httptest.NewRecorder()
@@ -122,7 +122,7 @@ func deliveredResponse(response *http.Response) (deliveredValue, error) {
 func TestLateResponseDoesNotRollBackGuardedClientOrServerCache(t *testing.T) {
 	key := "response-order"
 	store := &memoryProducts{values: map[string][]byte{key: responseV10}, versions: map[string]int64{key: 10}}
-	nodes := productClusterWithRouting(t, store, 0, true)
+	nodes := productCluster(t, store)
 	generated := make(chan deliveredValue, 1)
 	release := make(chan struct{})
 	var once sync.Once
@@ -219,7 +219,7 @@ func TestLateResponseDoesNotRollBackGuardedClientOrServerCache(t *testing.T) {
 	if guarded["other"].version != 1 || guarded[key].version != 11 {
 		t.Fatal("client compared versions across keys")
 	}
-	final, err := nodes[0].group.GetDirect(ctx, key)
+	final, err := nodes[0].group.Get(ctx, key)
 	if err != nil || final.Version() != 11 || final.String() != string(responseV11) {
 		t.Fatal("late delivery changed server cache", final, err)
 	}

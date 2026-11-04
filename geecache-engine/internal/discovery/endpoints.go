@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,16 +20,16 @@ import (
 
 type Watcher struct {
 	informer    kcache.SharedIndexInformer
-	router      *peer.Router
+	router      *cluster.Directory
 	ready       atomic.Bool
 	changes     chan struct{}
 	Report      func(count int, changed bool)
 	ReportError func()
 }
 
-func New(client kubernetes.Interface, namespace, service string, router *peer.Router) (*Watcher, error) {
+func New(client kubernetes.Interface, namespace, service string, router *cluster.Directory) (*Watcher, error) {
 	if namespace == "" || service == "" {
-		return nil, fmt.Errorf("namespace and peer service are required")
+		return nil, fmt.Errorf("namespace and member service are required")
 	}
 	informer := informers.NewFilteredEndpointSliceInformer(client, namespace, 0, kcache.Indexers{}, func(opts *metav1.ListOptions) {
 		opts.LabelSelector = discoveryv1.LabelServiceName + "=" + service
@@ -95,15 +95,15 @@ func (w *Watcher) rebuild() bool {
 }
 
 // Members selects usable IPv4 Pod endpoints. The informer already restricts Service and namespace.
-func Members(slices []*discoveryv1.EndpointSlice) []peer.Member {
-	var result []peer.Member
+func Members(slices []*discoveryv1.EndpointSlice) []cluster.Member {
+	var result []cluster.Member
 	for _, s := range slices {
 		if s.AddressType != discoveryv1.AddressTypeIPv4 {
 			continue
 		}
 		var port int32
 		for _, p := range s.Ports {
-			if p.Name != nil && *p.Name == "peer" && p.Port != nil && (p.Protocol == nil || *p.Protocol == corev1.ProtocolTCP) {
+			if p.Name != nil && *p.Name == "cluster" && p.Port != nil && (p.Protocol == nil || *p.Protocol == corev1.ProtocolTCP) {
 				port = *p.Port
 				break
 			}
@@ -133,7 +133,7 @@ func Members(slices []*discoveryv1.EndpointSlice) []peer.Member {
 				if ip == nil || ip.To4() == nil {
 					continue
 				}
-				result = append(result, peer.Member{ID: ns + "/" + e.TargetRef.Name, Address: net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))})
+				result = append(result, cluster.Member{ID: ns + "/" + e.TargetRef.Name, Address: net.JoinHostPort(ip.String(), strconv.Itoa(int(port)))})
 			}
 		}
 	}

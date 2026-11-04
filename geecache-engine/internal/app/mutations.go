@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 )
 
 // MutableSource requires atomic source-side preconditions. Expected version zero
@@ -21,10 +21,10 @@ type MutableSource interface {
 
 type mutationResponse struct {
 	// nil means unknown after a source error, not a guaranteed rollback.
-	SourceCommitted *bool                    `json:"source_committed"`
-	SourceVersion   *int64                   `json:"source_version,omitempty"`
-	Invalidation    *peer.InvalidationReport `json:"invalidation,omitempty"`
-	Error           string                   `json:"error,omitempty"`
+	SourceCommitted *bool                       `json:"source_committed"`
+	SourceVersion   *int64                      `json:"source_version,omitempty"`
+	Invalidation    *cluster.InvalidationReport `json:"invalidation,omitempty"`
+	Error           string                      `json:"error,omitempty"`
 }
 
 // Source-write and read-source budgets are independent policies even though
@@ -56,7 +56,7 @@ type mutationOutcome struct {
 }
 
 type mutationInvalidator interface {
-	InvalidateVersion(context.Context, *cache.Group, string, int64) (peer.InvalidationReport, error)
+	InvalidateVersion(context.Context, *cache.Group, string, int64) (cluster.InvalidationReport, error)
 }
 type mutationObserver interface {
 	Observe(string, string, time.Duration)

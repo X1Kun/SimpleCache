@@ -54,7 +54,7 @@ spec:
               gateway:
                 description: |-
                   Gateway enables direct key routing through an installed Envoy Gateway.
-                  Omit to retain Peer routing. Requires the controller's --enable-gateway flag.
+                  Without a Gateway replicas are independent local caches. Requires the controller's --enable-gateway flag.
                 properties:
                   className:
                     default: eg
@@ -68,14 +68,6 @@ spec:
                     minimum: 1
                     type: integer
                 type: object
-              hotCacheBytes:
-                description: |-
-                  HotCacheBytes reserves part of CacheBytes for remote read replicas.
-                  Zero disables hot caching; replicas have at most a one-second local TTL.
-                format: int64
-                maximum: 134217727
-                minimum: 0
-                type: integer
               image:
                 minLength: 1
                 type: string
@@ -90,7 +82,7 @@ spec:
               maxMissWaiters:
                 default: 128
                 description: |-
-                  MaxMissWaiters bounds each API/Peer miss-waiter lane and shared route tasks.
+                  MaxMissWaiters bounds API miss waiters.
                   Cache hits and probes do not acquire these slots.
                 format: int32
                 maximum: 4096
