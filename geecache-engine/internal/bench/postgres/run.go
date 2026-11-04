@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	sourcepostgres "github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
 	"io"
 	"net/http"
 	"net/url"
@@ -192,6 +193,12 @@ func Run(ctx context.Context, o Options) (summary Summary, result error) {
 	table := pgx.Identifier{schema, "simplecache_products"}.Sanitize()
 	if _, err := database.Exec(ctx, "CREATE TABLE "+table+" (key text PRIMARY KEY CHECK (octet_length(key) BETWEEN 1 AND 256), value bytea NOT NULL CHECK (octet_length(value)<=1048576), version bigint NOT NULL DEFAULT 1 CHECK(version>0), deleted boolean NOT NULL DEFAULT false, updated_at timestamptz NOT NULL DEFAULT now())"); err != nil {
 		return summary, errors.New("could not create comparison product table")
+	}
+	if _, err := database.Exec(ctx, "SET search_path TO "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		return summary, errors.New("could not select comparison schema")
+	}
+	if _, err := database.Exec(ctx, sourcepostgres.OutboxSchemaSQL); err != nil {
+		return summary, errors.New("could not create comparison outbox")
 	}
 	isolated, err := databaseURL(dsn, schema, "")
 	if err != nil {

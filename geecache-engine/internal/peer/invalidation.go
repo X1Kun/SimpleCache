@@ -18,10 +18,12 @@ type InvalidationResult struct {
 }
 
 type InvalidationReport struct {
-	Version  int64                `json:"version,omitempty"`
-	Scope    string               `json:"scope"`
-	Complete bool                 `json:"complete"`
-	Results  []InvalidationResult `json:"results"`
+	// Captured directory size, for relay readiness; not a wire delivery promise.
+	KnownMembers int                  `json:"-"`
+	Version      int64                `json:"version,omitempty"`
+	Scope        string               `json:"scope"`
+	Complete     bool                 `json:"complete"`
+	Results      []InvalidationResult `json:"results"`
 }
 
 // Invalidate uses one immutable membership snapshot. The initiating node is
@@ -37,7 +39,7 @@ func (r *Router) InvalidateVersion(ctx context.Context, group *cache.Group, key 
 	}
 	snapshot := r.state.Load()
 	report := InvalidationReport{
-		Scope: "known_members_snapshot", Complete: true, Version: version,
+		Scope: "known_members_snapshot", Complete: true, Version: version, KnownMembers: len(snapshot.members),
 		Results: []InvalidationResult{{Node: r.selfID, Status: "ok"}},
 	}
 	var clients []*Client

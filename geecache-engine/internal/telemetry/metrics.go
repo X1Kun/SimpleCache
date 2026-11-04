@@ -8,6 +8,9 @@ import (
 )
 
 type Metrics struct {
+	outboxPurgeEligible, outboxTableBytes                      prometheus.Gauge
+	outboxEvents                                               *prometheus.CounterVec
+	outboxPending, outboxOldest                                prometheus.Gauge
 	sourceRetries                                              *prometheus.CounterVec
 	versionEvents, versionRejections                           *prometheus.CounterVec
 	Registry                                                   *prometheus.Registry
@@ -35,6 +38,13 @@ func New() *Metrics {
 	histogram := func(name string) *prometheus.HistogramVec {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: name, Buckets: prometheus.DefBuckets}, []string{"result"})
 	}
+	m.outboxPurgeEligible = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_outbox_purge_eligible_events", Help: "Delivered notifications older than retention, sampled queue view"})
+	m.outboxTableBytes = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_outbox_table_bytes", Help: "PostgreSQL outbox table and index storage bytes"})
+	m.Registry.MustRegister(m.outboxPurgeEligible, m.outboxTableBytes)
+	m.outboxEvents = counter("simplecache_outbox_operations_total", "operation", "result")
+	m.outboxPending = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_outbox_pending_events", Help: "Pending durable notifications, per-process sampled queue view"})
+	m.outboxOldest = prometheus.NewGauge(prometheus.GaugeOpts{Name: "simplecache_outbox_oldest_pending_seconds", Help: "Age of oldest pending durable notification"})
+	m.Registry.MustRegister(m.outboxEvents, m.outboxPending, m.outboxOldest)
 	m.api = counter("simplecache_api_requests_total", "result")
 	m.peer = counter("simplecache_peer_requests_total", "result")
 	m.source = counter("simplecache_source_loads_total", "result")
@@ -158,3 +168,16 @@ func (m *Metrics) Membership(count int, changed bool) {
 	}
 }
 func (m *Metrics) DiscoveryError() { m.discoveryErrors.Inc() }
+
+func (m *Metrics) OutboxEvent(operation, result string) {
+	m.outboxEvents.WithLabelValues(operation, result).Inc()
+}
+func (m *Metrics) OutboxBacklog(pending int64, oldest time.Duration) {
+	m.outboxPending.Set(float64(pending))
+	m.outboxOldest.Set(oldest.Seconds())
+}
+
+func (m *Metrics) OutboxStorage(eligible, bytes int64) {
+	m.outboxPurgeEligible.Set(float64(eligible))
+	m.outboxTableBytes.Set(float64(bytes))
+}

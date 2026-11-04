@@ -31,7 +31,11 @@ func Run(ctx context.Context, c Config, dir string) (Summary, error) {
 	defer client.CloseIdleConnections()
 	r := runner{c: c, client: client, token: os.Getenv("CACHE_ADMIN_TOKEN"), expected: make([][]byte, c.Keys)}
 	for i := range r.expected {
-		r.expected[i] = Value(Key(c.Prefix, i), 1, c.ValueBytes)
+		value, err := c.productValue(i, 1)
+		if err != nil {
+			return Summary{}, err
+		}
+		r.expected[i] = value
 	}
 	trace := readTrace(c)
 	traceBytes, _ := json.Marshal(struct {

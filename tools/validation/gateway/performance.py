@@ -304,6 +304,8 @@ def measure(m: GatewayRun, proxies, previous=None):
                     # The owned fixture is quiescent before resetting its rows;
                     # all cache/floor processes are replaced before traffic.
                     statements=['INSERT INTO simplecache_products(key,value,version,deleted) VALUES ('+literal(key)+',convert_to('+literal(value(key,1,4096))+",'UTF8'),1,false) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,version=1,deleted=false;" for key in keys]
+                    m.wait_for('owned fixture outbox drained before version reset',
+                               lambda: sql(m, 'SELECT count(*) FROM simplecache_outbox WHERE delivered_at IS NULL') == '0', 120)
                     sql(m,'\n'.join(statements))
                     reset_workers(m,5 if scenario=='ttl' else 300)
                     addresses={m.obj('service',f'products-shard-{i}')['spec']['clusterIP'] for i in range(3)}

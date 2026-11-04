@@ -1,12 +1,11 @@
 # SimpleCache: architecture, operation, and roadmap
 
-Documentation updated 2026-11-02. Main a82d217 includes Gateway routing,
-conditional writes, bounded version floors, runtime safeguards, validation tooling
-and the consolidated runtime file layout. This working tree clarifies read-entry
-ownership, extracts Peer reads, validates directly constructed configurations
-before startup and names existing timeout policies. Valid documented workloads
-retain their routing, admission and protocol contracts; invalid direct configs
-now fail earlier. Historical measurements retain their original scope.
+Documentation updated 2026-11-02. This working tree adds PostgreSQL transactional
+Outbox notifications, leased retry/recovery workers, and delivery/crash contract
+tests on top of the organized runtime/validation layout. Synchronous write and
+protocol contracts remain; background delivery is at least once to a nonempty
+known-members snapshot, not a global reader barrier. Historical measurements
+retain their original scope.
 
 This is the project's single detailed guide. [README](../README.md) is the
 quick start; the Operator README only links here. Per-run logs, measurements
@@ -30,7 +29,7 @@ available for isolated cache and platform diagnostics.
 | Authority | PostgreSQL owns values and per-key increasing versions | Keep PostgreSQL authoritative |
 | Reads | Opt-in Gateway -> local cache/source; legacy Peer routing remains the default | Use paired route evidence; establish isolated baselines before capacity/SLO claims |
 | Writes | Authenticated create/update/delete with atomic source-version checks | Business services add their own predicates/transactions as needed |
-| Invalidation | Version-bearing best-effort HTTP fan-out, bounded floors and 256 epoch stripes | Durable delivery/catch-up only if required |
+| Invalidation | Atomic PostgreSQL Outbox, synchronous fan-out, leased retry, bounded floors and 256 epoch stripes | Per-target catch-up remains separate from snapshot completion |
 | Expiration | Lookup-time checks plus bounded lifecycle-owned cleanup | Evaluate reclamation behavior under larger working sets |
 | Protection | Bounded API/Peer miss waiters, shared routes, source queue and writes | Validate budgets against real container memory and workloads |
 | Replication | Disposable hot copies, no replicated shard groups | Start without cache replication; add only for measured recovery needs |
@@ -194,8 +193,8 @@ promise; this does not introduce a public minimum-version/linearizable-read API.
 Once a floor is retired and active work ends, new callers can no longer rely on
 that forgotten per-key history. They use resident versions, the authoritative
 primary source, existing Peer/TTL rules and future notifications. A restarted
-node loses both cache and floors and starts cold; a missed notification is not
-replayed automatically. Retention pressure, reconnects and unseen writes still
+node loses both cache and floors and starts cold. Pending PostgreSQL Outbox
+events are retried; completed events are not replayed for a newly joined holder. Retention pressure, reconnects and unseen writes still
 allow old reads under the existing weak consistency contract. The single-stripe
 diagnostic option remains available for historical comparisons.
 
@@ -324,7 +323,9 @@ is treated as an unknown outcome, not a successful versioned commit.
 - HTTP 200 with source_committed=true means all targets in this attempt
   acknowledged the announced version, not that every possible reader is synchronized.
 - HTTP 202 with source_committed=true means incomplete fan-out; failed/time-out
-  targets are reported, the source is not rolled back, and no retry is scheduled.
+  targets are reported and the source is not rolled back. PostgreSQL-backed
+  writes have a committed Outbox event for background retry; other adapters
+  retain their own delivery contract.
   A peer returning 204 without the matching version acknowledgement is marked
   unversioned and also produces 202 for a versioned broadcast.
 - HTTP 412 is a known failed condition and performs no mutation or broadcast.
@@ -353,7 +354,34 @@ Epoch fencing is local. In-flight distributed reads, omitted/offline nodes and
 crashes between commit and notification can expose old values. TTL is a fallback,
 not a linearizability or fixed-time-since-commit guarantee. A cached old value can still be read temporarily, but its ETag cannot overwrite
 a different current source version. Local epoch remains a fill fence, not a
-substitute for the database condition. No durable notification/replay or replicated cache protocol exists.
+substitute for the database condition. The PostgreSQL Outbox covers committed adapter mutations; it does not provide
+per-offline-holder catch-up or a replicated cache protocol.
+
+### Durable Outbox delivery
+
+See [Outbox design, deployment scope and lease protocol](../geecache-engine/internal/outbox/README.md).
+Every supported PostgreSQL adapter mutation records its committed key/version
+atomically. A single worker per authorized process claims with SKIP LOCKED,
+sends outside transactions, and acknowledges only its unexpired attempt token.
+Unacknowledged/failed work is retried; duplicate and out-of-order events use the
+existing cache version rules. Successful synchronous API delivery does not remove
+the durable record, so background duplicates are expected.
+
+One queue/search_path supports one cache invalidation domain. Snapshot success
+excludes unseen/offline holders; it does not establish strong reads or guarantee
+freshness at every proxy. Raw SQL does not automatically enqueue. Migrate using
+the existing explicit schema upgrade before deploying new writers. Completed
+notifications are purged in bounded batches after seven days; pending work is
+retained. Workers share the configured PostgreSQL pool and stop/join before it
+and the Router close. Read-only injected sources without credentials do not relay.
+
+Monitor `simplecache_outbox_purge_eligible_events` and `simplecache_outbox_table_bytes` (table plus indexes); these are sampled shared-queue views and must not be summed across workers.
+
+The subprocess comparison fixture does not run a relay; its atomic writes still
+create events within its owned schema, dropped at completion. Real Gateway
+measurements run the application relay, drain pending fixture events outside timed
+traffic before resetting versions, and retain the same worker/code for both modes.
+Source Getter metrics exclude polling and maintenance SQL.
 
 ## Agreed target architecture
 
@@ -377,10 +405,10 @@ flowchart TD
     I --> D
 ```
 
-The event path is produced by application code after commit; the current
-PostgreSQL adapter does not automatically publish it. The Gateway read path is now implemented as an opt-in deployment;
+The PostgreSQL adapter atomically records the event with the mutation; the
+application worker publishes it after commit. The Gateway read path is now implemented as an opt-in deployment;
 versioned invalidation is now implemented with bounded local floors. It still
-has no durable event relay, global reader barrier or guaranteed retained floor
+has no global reader barrier or guaranteed retained floor
 at every possible holder.
 
 ### Routing and shard boundaries
@@ -466,8 +494,9 @@ history, so delivery and TTL remain necessary.
 An optional minimum-version read may bypass old cache state and load the primary
 when a caller requires its completed write's version. It is not a global-latest
 or linearizable read contract. Reliable recovery from commit-before-notification
-crashes can later use a transactional Outbox/relay with retries, retention and
-catch-up or cache clearing. In-memory retry alone does not provide that guarantee.
+crashes now use the transactional Outbox/relay for pending events. Per-holder
+catch-up or cache clearing remains necessary for unseen/offline copies; in-memory
+retry alone does not provide durable recovery.
 
 ### Maintenance, admission and optional replicas
 
@@ -777,9 +806,13 @@ For real database integration, first apply schema.sql to a dedicated test DB:
 ```bash
 cd geecache-engine
 SIMPLECACHE_TEST_DATABASE_URL='postgres://.../dedicated_test_db?sslmode=disable' \
-  go test -race -count=1 -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle|VersionedInvalidation)$' \
+  go test -race -count=1 -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle|VersionedInvalidation|ResponseLossRetry|CommitBeforeBroadcastCrash|Outbox.*)$' \
   -v ./internal/source/postgres ./internal/app
 ```
+
+The response-loss retry and commit-before-broadcast SIGKILL tests are included
+in this selection. Their separate guarantees and the client response-order
+negative control are described in the [delivery contract tests](../geecache-engine/internal/README.md#retry-response-delivery-and-notification-crash-contracts).
 
 Without that variable, integration tests skip. They use owned keys/schemas,
 checking persistence through independent pools,
@@ -814,7 +847,9 @@ recovery.
 
 Every trial resets owned data and starts fresh cache subprocesses. The fixture
 reuses actual Group, Router, PostgreSQL source, handlers and metrics, with its
-own startup/drain path; it is not the deployed executable. Ports are literal
+own startup/drain path; it is not the deployed executable. It does not start the
+Outbox relay: writes persist events, but these measurements exclude relay polling,
+replay fan-out, maintenance SQL and their connection-pool contention. Ports are literal
 loopback, reserved before startup and released for child binding; conflicts fail
 before traffic. Stable node IDs prevent random ports changing placement.
 
@@ -1270,9 +1305,9 @@ and builds without publishing. CI does not run Kind or the heavy manual investig
 ## Delivery plan
 
 Gateway routing, conditional writes, runtime protection, version-bearing
-notifications and the combined functional experiments are merged. This change
-separates validation environment ownership, suite orchestration and reporting,
-with import-safe entrypoints and explicit run contexts. Exploratory
+notifications, runtime/validation organization and functional experiments are
+merged. This change adds atomic durable notification records and leased relay
+recovery alongside the synchronous path. Exploratory
 single-host numbers remain distinct from an isolated capacity or SLO baseline.
 
 | Stage | Work | Acceptance |
@@ -1282,9 +1317,10 @@ single-host numbers remain distinct from an isolated capacity or SLO baseline.
 | Merged | Paired real-chain routing measurements | Six scenarios preserve request errors, source counts, identities and environment limits |
 | Merged | Runtime and validation boundaries | Explicit runtime responsibilities, import-safe tools, owned-resource cleanup and report compatibility |
 | Merged | Cohesive file organization | Related helpers and behavior tests are co-located |
-| This change | Read/configuration clarity | Explicit read-entry ownership, extracted Peer reads, pure common validation with startup-specific requirements, and named timeout policies |
+| Merged | Read/configuration clarity | Explicit read-entry ownership, extracted Peer reads, pure common validation with startup-specific requirements, and named timeout policies |
 | Evidence-driven follow-up | Controlled capacity and stability baselines | Add bounded offered-rate scheduling and diverse deterministic datasets; measure saturation and recovery under declared environment conditions |
-| Conditional | Cache replicas or durable event relay | Add for measured cold-recovery needs or an explicit durable-notification requirement |
+| This change | Transactional Outbox and leased replay | Source/event atomicity, crash recovery, duplicate safety, lease fencing and bounded maintenance |
+| Conditional | Cache replicas or per-holder catch-up | Add for measured cold recovery or a stronger delivery-domain requirement |
 
 Keep the existing local/Peer evidence and functional Gateway smoke separate from
 new performance conclusions. Outbox/CDC and cache replication remain independent

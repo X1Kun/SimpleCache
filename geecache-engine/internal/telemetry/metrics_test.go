@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 )
@@ -92,5 +93,54 @@ func TestVersionGuardMetricsExposeBoundedRecordsAndRejectedLoads(t *testing.T) {
 		if observed[name] != want {
 			t.Errorf("%s=%v want %v", name, observed[name], want)
 		}
+	}
+}
+
+func TestOutboxMetricsSeparateDeliveryAndSampledBacklog(t *testing.T) {
+	m := New()
+	m.OutboxEvent("finish", "delivered")
+	m.OutboxEvent("finish", "retry")
+	m.OutboxEvent("finish", "lease_lost")
+	m.OutboxBacklog(3, 2*time.Second)
+	m.OutboxStorage(7, 4096)
+	families, err := m.Registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counters := 0
+	for _, family := range families {
+		switch family.GetName() {
+		case "simplecache_outbox_operations_total":
+			for _, metric := range family.Metric {
+				counters++
+				if metric.Counter.GetValue() != 1 {
+					t.Fatal(metric)
+				}
+				for _, label := range metric.Label {
+					if label.GetName() != "operation" && label.GetName() != "result" {
+						t.Fatal("unbounded outbox label", label)
+					}
+				}
+			}
+		case "simplecache_outbox_purge_eligible_events":
+			if family.Metric[0].Gauge.GetValue() != 7 {
+				t.Fatal(family)
+			}
+		case "simplecache_outbox_table_bytes":
+			if family.Metric[0].Gauge.GetValue() != 4096 {
+				t.Fatal(family)
+			}
+		case "simplecache_outbox_pending_events":
+			if family.Metric[0].Gauge.GetValue() != 3 {
+				t.Fatal(family)
+			}
+		case "simplecache_outbox_oldest_pending_seconds":
+			if family.Metric[0].Gauge.GetValue() != 2 {
+				t.Fatal(family)
+			}
+		}
+	}
+	if counters != 3 {
+		t.Fatal("missing outbox outcome series", counters)
 	}
 }

@@ -24,7 +24,7 @@ SimpleCache 是使用 Go 实现的加载式缓存，配套 Kubernetes Operator�
 | 并发保护 | API/Peer miss 等待、共享路由、回源队列及写请求分别限额 |
 | 版本保护 | 有界版本下界、epoch 屏障、最多一次旧版本回源重试 |
 | 部署 | StatefulSet；可选多代理 Envoy Gateway；每分片一个稳定 Service |
-| 一致性 | 失效通知尽力投递；没有持久化重放、强一致读或缓存副本协议 |
+| 一致性 | PostgreSQL 写入与 Outbox 事件原子提交，后台至少一次投递到成功的已知成员快照；不提供强一致读或离线节点补齐 |
 
 ### 读取路径与保护
 
@@ -97,7 +97,7 @@ Peer 接收端只做本地读取，不继续转发。路由和回源使用独立
 | 返回结果 | 含义 |
 | --- | --- |
 | `200`，`source_committed=true` | 数据库已提交，本次已知成员快照中的通知目标均确认；不代表所有读者同步 |
-| `202`，`source_committed=true` | 数据库已提交，部分通知失败；不回滚，也不自动安排重试 |
+| `202`，`source_committed=true` | 数据库已提交，部分通知失败；不回滚，PostgreSQL Outbox 事件留待后台重试 |
 | `412`，`source_committed=false` | 条件不匹配，没有修改或广播；重新读取并处理冲突 |
 | `428` | 缺少写入前置条件 |
 | `400` | 非法键/条件/版本；不支持弱 ETag、列表或通配 `If-Match` 等形式 |
@@ -109,7 +109,7 @@ Peer 接收端只做本地读取，不继续转发。路由和回源使用独立
 
 外部写入必须遵守相同版本规则并主动通知。API 仅 `POST /invalidate` 接受客户端提供该版本头；PUT/DELETE 从数据库结果获取版本。不带版本头表示强制清除已知副本，但保留已经知道的版本下界。
 
-**通知尽力投递，epoch 只保护本地回填。** 提交后崩溃、漏通知、离线成员和分布式在途读取仍可能暴露旧值；TTL 不是“提交后固定时间内最新”的保证。过期值不作为源故障时的隐式兜底，旧 ETag 也不能覆盖不同的当前数据库版本。
+**单次广播尽力投递，PostgreSQL Outbox 支持未完成事件的持久化重试；epoch 只保护本地回填。** 提交后崩溃、漏通知、离线成员和分布式在途读取仍可能暴露旧值；TTL 不是“提交后固定时间内最新”的保证。过期值不作为源故障时的隐式兜底，旧 ETag 也不能覆盖不同的当前数据库版本。
 
 ### 成员发现与 Operator
 
@@ -137,7 +137,7 @@ Gateway API 要求只含一个 `key` 参数，并使用规范 UTF-8 编码：百
 
 后续能力按需求引入：
 
-- **可靠通知**：明确要求提交后可恢复投递时，考虑事务 Outbox/relay、重试、保留和补偿；内存重试不能解决提交后崩溃。
+- **可靠通知**：已加入事务 Outbox/relay，重试未完成事件。一个队列对应一个缓存通知域，未发现/离线节点仍靠 TTL 或后续补齐；不是全局强一致读。
 - **缓存副本**：冷恢复过慢、回源压力或单分片瓶颈有证据时再增加；先分片，再选择副本，定义版本、过期继承和重连补齐规则。
 - **维护与扩容**：分批、有界地回收历史副本，不能逐键后台查询数据库；计算所有 Pod 的合计数据库压力。当前 `size` 是 Pod 数，不是分片/副本组合接口。
 
@@ -237,6 +237,8 @@ spec:
   ttlSeconds: 60
 ```
 
+业务 key 统一为 1–256 字节合法 UTF-8，不允许 NUL；不符合契约的请求返回 400。SimpleCache 名称需以字母开头，使用小写 DNS label，Peer 模式最多 59 字符，Gateway 模式最多 55 字符。
+
 CR 还支持 `maxMissWaiters`、`sourceMaxPending`、`maxConcurrentWrites` 和资源 requests/limits。`size` 范围 1–10；默认 CPU request 100m、内存 request 128 MiB、limit 256 MiB。移除 `sourceSecret` 回到 demo 模式。
 
 Gateway 部署需先安装固定版本 CRD，开启 Backend 扩展，准备 GatewayClass，并启用 Operator 的 `--enable-gateway`；随后为 CR 增加 `gateway: {className: eg, replicas: 2}`。代理副本范围 1–8。详细步骤见 [英文部署说明](design.md#envoy-gateway-deployment-and-smoke)。
@@ -271,11 +273,13 @@ Operator envtest 验证默认值、所有权、状态与 watch 修复，不运�
 cd geecache-engine
 SIMPLECACHE_TEST_DATABASE_URL='postgres://.../dedicated_test_db?sslmode=disable' \
   go test -race -count=1 \
-  -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle|VersionedInvalidation)$' \
+  -run '^TestPostgres(OpenChecksExecutionErrors|SchemaMigration|ConditionalWrites|ProductLifecycle|VersionedInvalidation|ResponseLossRetry|CommitBeforeBroadcastCrash|Outbox.*)$' \
   -v ./internal/source/postgres ./internal/app
 ```
 
 `postgres-compare` 是独立进程的数据库对照工具，默认 45 个试次，quick 为 15 个功能试次；它不是部署后的 Gateway 链路，结论需分开解释。
+
+新增契约测试分别验证：A 写入成功但响应丢失后，原 If-Match 重试返回 412、SQL 版本只前进一次；B 已生成的旧响应晚到时，无保护客户端会倒退，按 key 保护版本的参考客户端不倒退，服务端缓存也不回退；C 写入子进程在提交后、广播前被 SIGKILL，存活缓存通过原 TTL 过期回源恢复。B 仅为客户端策略示例，A 不提供幂等结果重放，C 不期待自动补发。详见 [契约测试说明](../geecache-engine/internal/README.md#retry-response-delivery-and-notification-crash-contracts)。
 
 ### 真实集群实验
 
@@ -333,6 +337,24 @@ GATEWAY_PERF_CONTINUE_REPORT=bin/reports/<retained-run> make gateway-perf
 
 Getter 次数会同时受缓存和 SingleFlight 影响，不能直接当命中率；进程 RSS/heap 快照和 Kubelet 采样不是连续内存峰值。数据库/OS 缓存未清空，不能用独立百分位相减估算 Gateway 自身开销。报告保留原始请求、指标、二进制校验和及实例身份，失败与跳过均需显式记录。
 
+### 事务 Outbox
+
+适配器的条件写入及可信 Put/Delete 将数据变更与 `(key, 提交版本)` 事件放在同一 SQL 事务：412 不生成事件，事件插入失败则数据一起回滚。原同步通知和 HTTP 200/202 契约保留，后台可能重复发送已同步成功的版本。
+
+每个有通知凭据的应用进程启动一个 worker；通过 SKIP LOCKED 领取事件并递增租约令牌，在数据库事务外发送，只允许未过期的当前令牌确认。默认空闲轮询 1 秒、租约 10 秒、发送预算 2 秒、数据库操作预算 1 秒，失败退避从 1 秒增加到最多 60 秒。未知确认结果或 worker 崩溃后，租约过期即可接管；不按失败次数丢事件。
+
+**同一 search_path 中的队列只服务一个缓存通知域。** 发送完成针对一个非空的已知成员快照，未知/离线副本仍依赖 TTL；完成事件不会因新节点加入自动重放。原始外部 SQL 不自动生成事件，必须另行遵守版本和事件事务契约。
+
+升级仍执行 `deploy/products/schema.sql`，先停旧写入者。现有卷不会自动初始化新表；启动会检查 Outbox 列。worker 与读写共用连接池，在 HTTP 排空后取消并等待退出，再关闭 Router/Store。每 30 秒采样积压，以每批 1,000 条、总共 1 秒的时间预算追赶清理已完成且超过 7 天的事件；未完成事件不清理，7 天不是严格删除时限。
+
+新验证包含：事件失败导致源回滚、并发独占领取、租约过期接管与旧令牌隔离、写入进程 SIGKILL 后新应用补发，以及发送后确认丢失的重复投递。旧 C 测试表示发送器尚未运行时的 TTL 兜底，新 C 测试验证发送器恢复后在 TTL 前修复缓存。B 的客户端保护仍仅为测试参考，不增加 UI、幂等结果存储。
+
+指标为 `simplecache_outbox_operations_total{operation,result}`、`simplecache_outbox_pending_events` 和 `simplecache_outbox_oldest_pending_seconds`。积压是各进程对同一队列的采样，不能跨 Pod 求和；Getter 次数不包含轮询 SQL。详见 [Outbox 设计](../geecache-engine/internal/outbox/README.md)。
+
+监控 `simplecache_outbox_purge_eligible_events`（超期已投递事件数）与 `simplecache_outbox_table_bytes`（含索引的表空间），均为共享队列的采样视图，不跨实例求和。
+
+PostgreSQL 对照压测的 `postgres-fixture` 未启动 Outbox relay；写入仍持久化事件，但测量不包含 relay 轮询、重放广播、维护 SQL 及其连接池竞争。
+
 ### 观测与 CI
 
 `/metrics` 区分 API/Peer、回源、排队、写入、广播、版本拒绝、缓存与主动清理。重点指标包括：
@@ -356,6 +378,7 @@ CI 在 PR、main 推送或手动触发时执行格式、vet、Race、Python 回�
 | 已实现 | Gateway 直接路由、条件写入、版本失效、有界元数据、主动过期及并发保护 |
 | 已补充验证 | 旧版本有界重试、版本记录淘汰保护、LRU key 所有权、响应写超时、续跑失败汇总 |
 | 下一步 | 在受控资源环境建立容量、过载恢复和长时间混合负载基线，继续核对容器内存及集群数据库总预算 |
-| 按需引入 | 可靠通知 Outbox/relay，或为明确冷恢复需求增加缓存副本；两者独立决策 |
+| 本轮加入 | 事务 Outbox、租约接管、持久化重试与崩溃恢复验证 |
+| 按需引入 | 离线节点补齐或缓存副本，按实际需求独立决策 |
 
 完整参数、协议边界、历史证据与参考链接见 [英文版](design.md)。

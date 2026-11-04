@@ -95,7 +95,11 @@ func mutate(w http.ResponseWriter, r *http.Request, group *cache.Group, opts API
 			command.kind = mutationDelete
 		}
 	}
-	outcome := executeMutation(opts.Lifecycle, group, opts.Store, opts.Router, command, metrics)
+	var observer mutationObserver
+	if metrics != nil {
+		observer = metrics
+	}
+	outcome := executeMutation(opts.Lifecycle, group, opts.Store, opts.Router, command, observer)
 	response, writeErr := outcome.response, outcome.writeErr
 	if errors.Is(writeErr, cache.ErrPreconditionFailed) {
 		w.Header().Set("Content-Type", "application/json")

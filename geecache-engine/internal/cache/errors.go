@@ -3,13 +3,15 @@ package cache
 import (
 	"context"
 	"errors"
+	"strings"
+	"unicode/utf8"
 )
 
 const MaxValueBytes = 1 << 20
 
 var (
 	ErrNotFound           = errors.New("key not found")
-	ErrInvalidKey         = errors.New("key must contain 1 to 256 bytes")
+	ErrInvalidKey         = errors.New("key must contain 1 to 256 UTF-8 bytes without NUL")
 	ErrValueTooLarge      = errors.New("value exceeds 1MiB")
 	ErrPreconditionFailed = errors.New("source version precondition failed")
 	ErrInvalidVersion     = errors.New("invalid source invalidation version")
@@ -37,7 +39,7 @@ func Result(err error) string {
 }
 
 func ValidateKey(key string) error {
-	if len(key) == 0 || len(key) > 256 {
+	if len(key) == 0 || len(key) > 256 || !utf8.ValidString(key) || strings.ContainsRune(key, 0) {
 		return ErrInvalidKey
 	}
 	return nil
