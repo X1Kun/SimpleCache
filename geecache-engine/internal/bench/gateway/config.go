@@ -13,23 +13,25 @@ type RateStage struct {
 }
 
 type Config struct {
-	DatasetProfile  string      `json:"dataset_profile,omitempty"`
-	KeyStyle        string      `json:"key_style,omitempty"`
-	Distribution    string      `json:"distribution,omitempty"`
-	MaxPending      int         `json:"max_pending,omitempty"`
-	Stages          []RateStage `json:"stages,omitempty"`
-	Endpoint        string      `json:"endpoint"`
-	Host            string      `json:"host"`
-	Prefix          string      `json:"prefix"`
-	Scenario        string      `json:"scenario"`
-	Keys            int         `json:"keys"`
-	ValueBytes      int         `json:"value_bytes"`
-	Reads           int         `json:"reads"`
-	Workers         int         `json:"workers"`
-	ThinkMillis     int         `json:"think_ms"`
-	Seed            int64       `json:"seed"`
-	Windows         int         `json:"windows"`
-	DurationSeconds int         `json:"duration_seconds"`
+	MaxScheduleLagMillis int         `json:"max_schedule_lag_ms,omitempty"`
+	MaxCatchUp           int         `json:"max_catch_up,omitempty"`
+	DatasetProfile       string      `json:"dataset_profile,omitempty"`
+	KeyStyle             string      `json:"key_style,omitempty"`
+	Distribution         string      `json:"distribution,omitempty"`
+	MaxPending           int         `json:"max_pending,omitempty"`
+	Stages               []RateStage `json:"stages,omitempty"`
+	Endpoint             string      `json:"endpoint"`
+	Host                 string      `json:"host"`
+	Prefix               string      `json:"prefix"`
+	Scenario             string      `json:"scenario"`
+	Keys                 int         `json:"keys"`
+	ValueBytes           int         `json:"value_bytes"`
+	Reads                int         `json:"reads"`
+	Workers              int         `json:"workers"`
+	ThinkMillis          int         `json:"think_ms"`
+	Seed                 int64       `json:"seed"`
+	Windows              int         `json:"windows"`
+	DurationSeconds      int         `json:"duration_seconds"`
 }
 
 func Validate(c Config) error {
@@ -41,7 +43,7 @@ func Validate(c Config) error {
 		return fmt.Errorf("invalid bounded workload options")
 	}
 	switch c.Scenario {
-	case "warm-hot", "capacity", "zipf", "cold-key", "mixed", "ttl":
+	case "warm-hot", "capacity", "zipf", "cold-key", "mixed", "ttl", "arrival":
 	default:
 		return fmt.Errorf("invalid scenario")
 	}
@@ -51,11 +53,18 @@ func Validate(c Config) error {
 	if c.Scenario == "ttl" && c.DurationSeconds < 5 {
 		return fmt.Errorf("TTL workload requires a duration")
 	}
+	if c.Scenario == "arrival" {
+		if err := validateArrival(c); err != nil {
+			return err
+		}
+	} else if c.Distribution != "" || c.MaxPending != 0 || c.MaxScheduleLagMillis != 0 || c.MaxCatchUp != 0 {
+		return fmt.Errorf("arrival options require arrival scenario")
+	}
 	if err := validateDataset(c); err != nil {
 		return err
 	}
 
-	if len(c.Stages) != 0 {
+	if c.Scenario != "arrival" && len(c.Stages) != 0 {
 		return fmt.Errorf("stages require arrival scenario")
 	}
 	return nil

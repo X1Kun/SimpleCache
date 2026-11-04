@@ -13,6 +13,7 @@ import (
 
 func main() {
 	config := flag.String("config", "", "JSON workload configuration")
+	fixture := flag.String("fixture", "", "write validated fixture SQL and exit")
 	out := flag.String("out", "", "artifact directory")
 	flag.Parse()
 	file, e := os.Open(*config)
@@ -24,6 +25,21 @@ func main() {
 	_ = file.Close()
 	if e != nil {
 		log.Fatal("configuration decode failed")
+	}
+	if *fixture != "" {
+		if err := gatewaybench.Validate(c); err != nil {
+			log.Fatal(err)
+		}
+		file, err := os.Create(*fixture)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = gatewaybench.WriteFixture(file, c)
+		closeErr := file.Close()
+		if err != nil || closeErr != nil {
+			log.Fatal("fixture generation failed: ", err, closeErr)
+		}
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

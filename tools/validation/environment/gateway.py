@@ -95,7 +95,7 @@ nodes:
             'volumes': [{'name': 'schema', 'configMap': {'name': 'product-schema'}}]}},
         {'apiVersion': 'v1', 'kind': 'Service', 'metadata': {'name': 'postgres'}, 'spec': {'selector': {'app': 'postgres'}, 'ports': [{'port': 5432}]}},
     ]
-    if ctx.extended or ctx.performance:
+    if ctx.extended or ctx.performance or ctx.arrival:
         pg = next(o for o in database_objects if o['kind'] == 'Pod')
         pg['spec']['volumes'].append({'name': 'functional-data', 'emptyDir': {'medium': 'Memory', 'sizeLimit': '512Mi'}})
         pg['spec']['containers'][0]['volumeMounts'].append({'name': 'functional-data', 'mountPath': '/var/lib/postgresql/data'})
@@ -107,7 +107,7 @@ nodes:
              for c in ctx.obj('pod', 'postgres').get('status', {}).get('conditions', [])), 300)
     ctx.apply({'apiVersion': 'cache.x1kun.com/v1', 'kind': 'SimpleCache', 'metadata': {'name': 'products'}, 'spec': {
         'image': 'simplecache-engine:gateway', 'size': 3, 'sourceSecret': 'products', 'ttlSeconds': 300,
-        **({'cacheBytes': 1048576} if ctx.performance else {}),
+        **({'cacheBytes': 1048576} if ctx.performance or ctx.arrival else {}),
         'gateway': {'className': 'eg', 'replicas': 2}}})
     ctx.wait_for('EnvoyProxy created', lambda: ctx.obj('envoyproxy', 'products'))
     ctx.k('patch', 'envoyproxy', 'products', '--type=merge', '-p', json.dumps({

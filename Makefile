@@ -79,3 +79,17 @@ gateway-test:
 
 gateway-perf: gateway-test
 	python3 -m tools.validation --suite performance
+
+.PHONY: arrival-smoke
+# Requires an explicitly selected disposable PostgreSQL database; owns its schema.
+arrival-smoke:
+	@test -n "$${SIMPLECACHE_TEST_DATABASE_URL:-}" || { echo "Set SIMPLECACHE_TEST_DATABASE_URL to an initialized disposable database" >&2; exit 1; }
+	cd geecache-engine && go test -race -count=1 -timeout=2m -run '^TestArrivalRuntimeIntegration$$' -v ./internal/bench/gateway
+
+.PHONY: gateway-arrival
+gateway-arrival:
+	python3 -m tools.validation --suite arrival
+
+.PHONY: arrival-calibration
+arrival-calibration:
+	python3 -m tools.validation.arrival_calibration

@@ -13,6 +13,7 @@ class RunReport:
         settings = dict(os.environ if environ is None else environ)
         self.extended = settings.get('GATEWAY_EXTENDED', '0') == '1'
         self.performance = settings.get('GATEWAY_PERF', '0') == '1'
+        self.arrival = settings.get('GATEWAY_ARRIVAL', '0') == '1'
         self.keep_failed = settings.get('GATEWAY_KEEP_FAILED', '0') == '1'
         self.report = self.root / 'bin/reports' / (datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '-gateway-' + secrets.token_hex(3))
         self.cluster = 'simplecache-gateway-' + secrets.token_hex(4)
@@ -23,7 +24,7 @@ class RunReport:
         self.local_proxy_tag_created = False
         self.trace_lock = threading.Lock()
         self.started = time.monotonic()
-        self.results = {'cluster': self.cluster, 'checks': [], 'suite': 'performance' if self.performance else ('extended' if self.extended else 'smoke'), 'phase': 'setup'}
+        self.results = {'cluster': self.cluster, 'checks': [], 'suite': 'arrival' if self.arrival else ('performance' if self.performance else ('extended' if self.extended else 'smoke')), 'phase': 'setup'}
 
     def open(self):
         self.report.mkdir(parents=True)

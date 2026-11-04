@@ -23,6 +23,7 @@ imports; callers in this repository have moved. Executable names, CLI options,
 workload values, result schemas and report locations remain compatible.
 Historical pprof files must continue to use their original matching binaries.
 
-Workload-specific correctness rules and latency scopes remain distinct. Common
-arrival-rate scheduling and diverse datasets will be introduced with dedicated
-behavioral tests rather than inferred from similar-looking legacy helpers.
+Workload-specific correctness rules and latency scopes remain distinct.
+`arrival.go` implements bounded open-loop scheduling and stage/cohort reports.
+See [arrival experiments](../../../docs/experiments/arrival.md) for fixture
+ownership, short real-runtime qualification, outcome rules and remaining work.

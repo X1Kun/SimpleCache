@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 	"io"
 	"strings"
 )
@@ -106,8 +107,8 @@ func validateDataset(c Config) error {
 	for i := 0; i < c.Keys; i++ {
 		key := c.datasetKey(i)
 		size, _ := c.sizeClass(i)
-		if len(key) > 256 {
-			return fmt.Errorf("dataset key exceeds 256 bytes")
+		if err := cache.ValidateKey(key); err != nil {
+			return fmt.Errorf("invalid dataset key: %w", err)
 		}
 		total += int64(len(key) + size)
 	}
