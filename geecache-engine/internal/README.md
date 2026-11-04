@@ -8,6 +8,7 @@
 | `discovery` | EndpointSlice observations published to the Peer directory/router |
 | `source/postgres`, `demo` | Authoritative loading-source implementations |
 | `telemetry` | Metrics implementing cache observers |
+| `outbox` | Durable event lease/send/ack loop; PostgreSQL storage adapter owns atomic source/event SQL |
 | `bench`, `validation` | Workload/validation tools; not production dependencies |
 
 `app` assembles adapters around `cache`. `peer`, sources and telemetry depend on
@@ -144,3 +145,37 @@ source deadline. Rejection may still end as 503. Floor retirement cannot weaken
 an active flight's captured minimum. Missed notifications and in-flight reads
 still allow old values under the documented weak consistency contract; this is
 not a latest-value or linearizable-read API.
+
+## Retry, response delivery and notification crash contracts
+
+The tests keep three guarantees separate. Versions 10/11 refer to authoritative
+source generations/ETags; full payloads are checked independently.
+
+| Contract | Test | Expected result |
+| --- | --- | --- |
+| A: successful write loses its response; identical old-condition retry reaches another instance | `TestLostWriteResponseRetryKeepsOneCommittedVersion`, `TestPostgresResponseLossRetry` | First response is buffered until mutation/fan-out finish, then its connection is closed without delivery. Retry returns 412, not the first result; memory write count is one, independent SQL version/payload remain 11. |
+| B: generated v10 response arrives after v11 | `TestLateResponseDoesNotRollBackGuardedClientOrServerCache` | A channel holds response delivery after lookup/encoding. The unguarded reference client regresses (negative control); the per-key version-guarded reference stays at 11. The original server cache stays at 11 without another source read. |
+| C: writer dies after SQL commit but before notification | `TestPostgresCommitBeforeBroadcastCrash` | An inherited pipe reports commit from inside a test-only Store wrapper that never returns to the coordinator. Parent SIGKILLs the writer and checks the exit signal. Warm survivor returns 10 with zero notifications, then reloads 11 at its original expiry. |
+
+B is a test-only client policy demonstration, not a shipped UI/SDK or a server
+linearizability promise. A does not add idempotent result storage. The original C case intentionally runs without a relay and verifies TTL fallback.
+`TestPostgresOutboxCrashRecovery` starts a new application runtime and verifies
+replay before TTL; `TestPostgresOutboxDuplicateDelivery` loses a post-send ack,
+expires/reclaims the lease and verifies redelivery preserves newer cache values.
+
+C requires a dedicated initialized `SIMPLECACHE_TEST_DATABASE_URL` and inherited
+Unix file descriptors. The subprocess fixture skips normal suite execution.
+A ready/control handshake keeps process initialization outside the stale-cache
+TTL window; channels/pipes order all mutations and deliveries. Expiry waits use
+the cached value's remaining lifetime with a parent deadline, not an arbitrary
+sleep or a commit-relative freshness SLA. Fixtures and child processes are closed
+on failures too; cleanup removes only each test's unique SQL key.
+
+## Outbox lifecycle
+
+See [the durable delivery design](outbox/README.md). PostgreSQL schema migration
+is required before startup. API synchronous notification remains; a source that
+implements outbox.Queue and has an admin token starts one background worker.
+HTTP drain precedes relay cancellation/join; Router and Store close afterwards.
+One queue belongs to one invalidation domain, and completion is for a nonempty
+known-member snapshot. Offline/unseen copies still rely on TTL/recovery.

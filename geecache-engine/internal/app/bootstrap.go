@@ -13,6 +13,7 @@ import (
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/demo"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/discovery"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/outbox"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
@@ -136,6 +137,14 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 		go watcher.Run(work)
 	}
 	go group.RunMaintenance(work)
+	if queue, ok := source.(outbox.Queue); ok && c.AdminToken != "" {
+		relayCtx, stopRelay := context.WithCancel(work)
+		relayDone := make(chan struct{})
+		defer func() { stopRelay(); <-relayDone }() // Join before Router/Store are closed.
+		relay := outbox.Worker{Queue: queue, Observer: metrics, Send: outboxSender(ready, group, router)}
+		go func() { defer close(relayDone); relay.Run(relayCtx) }()
+	}
+
 	if c.ProfileContention {
 		previous := runtime.SetMutexProfileFraction(10)
 		runtime.SetBlockProfileRate(1000000)
@@ -151,6 +160,24 @@ func RunWithSource(ctx context.Context, c Config, source cache.Getter) error {
 	}
 	slog.Info("Cache server started", "identity", c.SelfID, "discovery", c.DiscoveryMode, "listeners", addresses)
 	return serve(ctx, servers, listeners, &serving)
+}
+
+// A relay can finish only a successful nonempty captured membership snapshot.
+// Readiness alone can legitimately have an empty discovery view during startup.
+func outboxSender(ready func() bool, group *cache.Group, router *peer.Router) outbox.Sender {
+	return func(ctx context.Context, event outbox.Event) error {
+		if !ready() {
+			return errors.New("outbox discovery not ready")
+		}
+		report, err := router.InvalidateVersion(ctx, group, event.Key, event.Version)
+		if err != nil {
+			return err
+		}
+		if !report.Complete || report.KnownMembers == 0 {
+			return errors.New("outbox delivery incomplete")
+		}
+		return nil
+	}
 }
 
 func newDataServer(addr string, handler http.Handler) *http.Server {

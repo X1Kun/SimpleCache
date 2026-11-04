@@ -39,6 +39,15 @@ func Open(ctx context.Context, url string, maxConnections int32) (*Store, error)
 		pool.Close()
 		return nil, errors.New("PostgreSQL startup check failed; check connectivity and apply schema.sql")
 	}
+	rows, err = pool.Query(ctx, "SELECT id,key,version,attempts,available_at,leased_until,delivered_at,created_at FROM simplecache_outbox LIMIT 0")
+	if err == nil {
+		rows.Close()
+		err = rows.Err()
+	}
+	if err != nil {
+		pool.Close()
+		return nil, errors.New("PostgreSQL outbox startup check failed; apply schema.sql")
+	}
 	return &Store{pool: pool}, nil
 }
 
@@ -62,7 +71,7 @@ func (s *Store) GetVersioned(ctx context.Context, key string) (cache.SourceValue
 		if ctx.Err() != nil {
 			return cache.SourceValue{}, ctx.Err()
 		}
-		return cache.SourceValue{}, errors.New("PostgreSQL read failed")
+		return cache.SourceValue{}, databaseError("PostgreSQL read failed", err)
 	}
 	return value, nil
 }
@@ -73,9 +82,9 @@ func (s *Store) Put(ctx context.Context, key string, value []byte) error {
 	if err := validateValue(key, value); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
+	_, err := s.pool.Exec(ctx, `WITH changed AS (INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
 		ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
-		version = simplecache_products.version + 1, deleted = false, updated_at = now()`, key, value)
+		version = simplecache_products.version + 1, deleted = false, updated_at = now() RETURNING key,version) INSERT INTO simplecache_outbox(key,version) SELECT key,version FROM changed`, key, value)
 	return writeError(ctx, err)
 }
 
@@ -91,14 +100,14 @@ func (s *Store) PutIfVersion(ctx context.Context, key string, value []byte, expe
 	var version int64
 	var err error
 	if expected == 0 {
-		err = s.pool.QueryRow(ctx, `INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
+		err = s.pool.QueryRow(ctx, `WITH changed AS (INSERT INTO simplecache_products (key, value) VALUES ($1, $2)
 			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
 			version = simplecache_products.version + 1, deleted = false, updated_at = now()
-			WHERE simplecache_products.deleted RETURNING version`, key, value).Scan(&version)
+			WHERE simplecache_products.deleted RETURNING key,version) INSERT INTO simplecache_outbox(key,version) SELECT key,version FROM changed RETURNING version`, key, value).Scan(&version)
 	} else {
-		err = s.pool.QueryRow(ctx, `UPDATE simplecache_products SET value = $2,
+		err = s.pool.QueryRow(ctx, `WITH changed AS (UPDATE simplecache_products SET value = $2,
 			version = version + 1, updated_at = now()
-			WHERE key = $1 AND version = $3 AND NOT deleted RETURNING version`, key, value, expected).Scan(&version)
+			WHERE key = $1 AND version = $3 AND NOT deleted RETURNING key,version) INSERT INTO simplecache_outbox(key,version) SELECT key,version FROM changed RETURNING version`, key, value, expected).Scan(&version)
 	}
 	return mutationResult(ctx, version, err)
 }
@@ -110,9 +119,9 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	if err := cache.ValidateKey(key); err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `UPDATE simplecache_products SET value = ''::bytea,
+	_, err := s.pool.Exec(ctx, `WITH changed AS (UPDATE simplecache_products SET value = ''::bytea,
 		version = version + 1, deleted = true, updated_at = now()
-		WHERE key = $1 AND NOT deleted`, key)
+		WHERE key = $1 AND NOT deleted RETURNING key,version) INSERT INTO simplecache_outbox(key,version) SELECT key,version FROM changed`, key)
 	return writeError(ctx, err)
 }
 
@@ -124,9 +133,9 @@ func (s *Store) DeleteIfVersion(ctx context.Context, key string, expected int64)
 		return 0, errors.New("invalid expected version")
 	}
 	var version int64
-	err := s.pool.QueryRow(ctx, `UPDATE simplecache_products SET value = ''::bytea,
+	err := s.pool.QueryRow(ctx, `WITH changed AS (UPDATE simplecache_products SET value = ''::bytea,
 		version = version + 1, deleted = true, updated_at = now()
-		WHERE key = $1 AND version = $2 AND NOT deleted RETURNING version`, key, expected).Scan(&version)
+		WHERE key = $1 AND version = $2 AND NOT deleted RETURNING key,version) INSERT INTO simplecache_outbox(key,version) SELECT key,version FROM changed RETURNING version`, key, expected).Scan(&version)
 	return mutationResult(ctx, version, err)
 }
 
@@ -157,5 +166,18 @@ func writeError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return errors.New("PostgreSQL write failed")
+	return databaseError("PostgreSQL write failed", err)
+}
+
+// The public message stays credential-free; internal diagnostics may inspect the
+// original driver error with errors.As/Is without exposing it over HTTP.
+type storeError struct {
+	message string
+	cause   error
+}
+
+func (e *storeError) Error() string { return e.message }
+func (e *storeError) Unwrap() error { return e.cause }
+func databaseError(message string, cause error) error {
+	return &storeError{message: message, cause: cause}
 }

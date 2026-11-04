@@ -11,6 +11,15 @@ import (
 )
 
 func validateSpec(cr *cachev1.SimpleCache) error {
+	// The longest Peer-mode Service suffix is "-api"; Gateway adds "-shard-N".
+	maxName := 59
+	if cr.Spec.Gateway != nil {
+		maxName = 55
+	}
+	if len(cr.Name) > maxName || len(validation.IsDNS1035Label(cr.Name)) != 0 {
+		return fmt.Errorf("name must be a DNS label starting with a letter, at most %d characters", maxName)
+	}
+
 	if err := validateGateway(cr); err != nil {
 		return err
 	}

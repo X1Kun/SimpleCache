@@ -46,6 +46,9 @@ func TestPostgresOpenChecksExecutionErrors(t *testing.T) {
 	params.Set("default_query_exec_mode", "cache_statement")
 	parsed.RawQuery = params.Encode()
 	isolatedDSN := parsed.String()
+	if _, err := admin.Exec(ctx, "SET search_path TO "+quotedSchema); err != nil {
+		t.Fatal(err)
+	}
 	assertRejected := func() {
 		t.Helper()
 		store, err := Open(ctx, isolatedDSN, 1)
@@ -60,6 +63,10 @@ func TestPostgresOpenChecksExecutionErrors(t *testing.T) {
 	assertRejected()
 	table := quotedSchema + ".simplecache_products"
 	if _, err := admin.Exec(ctx, "CREATE TABLE "+table+" (key text, value bytea, version bigint, deleted boolean)"); err != nil {
+		t.Fatal(err)
+	}
+	assertRejected() // A product table alone lacks the required durable queue.
+	if _, err := admin.Exec(ctx, OutboxSchemaSQL); err != nil {
 		t.Fatal(err)
 	}
 	store, err := Open(ctx, isolatedDSN, 1)

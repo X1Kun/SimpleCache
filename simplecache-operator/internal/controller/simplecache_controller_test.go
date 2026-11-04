@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -320,5 +321,24 @@ var _ = Describe("SimpleCache controller contract", func() {
 			}
 			return svc.UID != previousUID && metav1.IsControlledBy(&svc, cr)
 		}, 10*time.Second, 50*time.Millisecond).Should(BeTrue())
+	})
+})
+
+var _ = Describe("Invalid derived resource names", func() {
+	It("reports InvalidSpec before creating children", func() {
+		for _, name := range []string{"review.cache", "1cache", strings.Repeat("a", 60)} {
+			cr := &cachev1.SimpleCache{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}, Spec: cachev1.SimpleCacheSpec{Image: "cache:test"}}
+			Expect(k8sClient.Create(ctx, cr)).To(Succeed())
+			r := &SimpleCacheReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			_, err := r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, key, cr)).To(Succeed())
+			condition := meta.FindStatusCondition(cr.Status.Conditions, "Ready")
+			Expect(condition).NotTo(BeNil())
+			Expect(condition.Reason).To(Equal("InvalidSpec"))
+			Expect(errors.IsNotFound(k8sClient.Get(ctx, types.NamespacedName{Name: name + "-cache", Namespace: testNamespace}, &corev1.ServiceAccount{}))).To(BeTrue())
+			Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
+		}
 	})
 })

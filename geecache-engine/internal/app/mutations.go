@@ -7,7 +7,6 @@ import (
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 )
 
 // MutableSource requires atomic source-side preconditions. Expected version zero
@@ -56,9 +55,16 @@ type mutationOutcome struct {
 	broadcastErr error
 }
 
+type mutationInvalidator interface {
+	InvalidateVersion(context.Context, *cache.Group, string, int64) (peer.InvalidationReport, error)
+}
+type mutationObserver interface {
+	Observe(string, string, time.Duration)
+}
+
 // executeMutation owns the post-validation write and notification lifecycle.
 // Caller disconnection cannot cancel this work; service shutdown still can.
-func executeMutation(lifecycle context.Context, group *cache.Group, store MutableSource, router *peer.Router, command mutationCommand, metrics *telemetry.Metrics) mutationOutcome {
+func executeMutation(lifecycle context.Context, group *cache.Group, store MutableSource, router mutationInvalidator, command mutationCommand, metrics mutationObserver) mutationOutcome {
 	if lifecycle == nil {
 		lifecycle = context.Background()
 	}

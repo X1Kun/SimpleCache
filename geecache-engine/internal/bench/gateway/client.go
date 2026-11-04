@@ -21,10 +21,15 @@ type runner struct {
 
 func (r *runner) request(ctx context.Context, index, keyIndex int, method string, expected, min, max int64) Record {
 	out := Record{Index: index, KeyIndex: keyIndex, Method: method, Attempted: true, CommittedAtStart: min}
-	key := Key(r.c.Prefix, keyIndex)
+	key := r.c.datasetKey(keyIndex)
 	var body io.Reader
 	if method == "PUT" {
-		body = bytes.NewReader(Value(key, expected+1, r.c.ValueBytes))
+		value, err := r.c.productValue(keyIndex, expected+1)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		body = bytes.NewReader(value)
 	}
 	started := time.Now()
 	req, e := http.NewRequestWithContext(ctx, method, r.c.Endpoint+"/api?key="+strings.ReplaceAll(url.QueryEscape(key), "+", "%20"), body)
@@ -44,7 +49,7 @@ func (r *runner) request(ctx context.Context, index, keyIndex int, method string
 		out.Error = "transport or deadline failure"
 		return out
 	}
-	data, e := io.ReadAll(io.LimitReader(response.Body, int64(r.c.ValueBytes+4097)))
+	data, e := io.ReadAll(io.LimitReader(response.Body, int64(r.c.maxValueSize()+4097)))
 	_ = response.Body.Close()
 	out.ElapsedMS = float64(time.Since(started)) / float64(time.Millisecond)
 	out.Status = response.StatusCode
@@ -98,10 +103,15 @@ func (r *runner) request(ctx context.Context, index, keyIndex int, method string
 		out.Incorrect = true
 	}
 	var wanted []byte
-	if value.Version == 1 {
+	if value.Version == 1 && r.expected != nil {
 		wanted = r.expected[keyIndex]
 	} else {
-		wanted = Value(key, value.Version, r.c.ValueBytes)
+		var err error
+		wanted, err = r.c.productValue(keyIndex, value.Version)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
 	}
 	if !bytes.Equal(data, wanted) {
 		out.Incorrect = true
