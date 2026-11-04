@@ -13,12 +13,13 @@ def interrupted(signum, frame):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Owned Gateway cluster validation')
-    parser.add_argument('--suite', choices=['smoke', 'extended', 'performance'],
+    parser.add_argument('--suite', choices=['smoke', 'extended', 'performance', 'arrival'],
                         help='Defaults to the existing GATEWAY_EXTENDED/GATEWAY_PERF environment flags')
     args = parser.parse_args(argv)
     settings = dict(os.environ)
     if args.suite:
         settings['GATEWAY_EXTENDED'] = str(int(args.suite == 'extended'))
+        settings['GATEWAY_ARRIVAL'] = str(int(args.suite == 'arrival'))
         settings['GATEWAY_PERF'] = str(int(args.suite == 'performance'))
     previous = signal.signal(signal.SIGTERM, interrupted)
     try:

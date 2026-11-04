@@ -43,3 +43,10 @@ lives in `internal/validation/report`, and adversarial tests in
 This refactor does not change workload generation, request validation, cache
 behavior or experiment budgets.
 Capacity scheduling and dataset diversification are subsequent changes.
+
+Fixed-rate workloads and their one-node PostgreSQL/runtime qualification are
+documented in [arrival experiments](../../docs/experiments/arrival.md).
+
+`make gateway-arrival` runs fixed-rate workloads through an owned Kind Gateway
+with separate client, cache and PostgreSQL Pods. See
+[Kind arrival experiments](../../docs/experiments/arrival-kind.md).

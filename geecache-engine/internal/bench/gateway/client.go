@@ -20,8 +20,15 @@ type runner struct {
 }
 
 func (r *runner) request(ctx context.Context, index, keyIndex int, method string, expected, min, max int64) Record {
+	return r.requestExpected(ctx, index, keyIndex, method, expected, min, max, false)
+}
+
+func (r *runner) requestExpected(ctx context.Context, index, keyIndex int, method string, expected, min, max int64, missing bool) Record {
 	out := Record{Index: index, KeyIndex: keyIndex, Method: method, Attempted: true, CommittedAtStart: min}
 	key := r.c.datasetKey(keyIndex)
+	if missing {
+		key = r.c.Prefix + "-missing-" + strconv.Itoa(keyIndex)
+	}
 	var body io.Reader
 	if method == "PUT" {
 		value, err := r.c.productValue(keyIndex, expected+1)
@@ -58,8 +65,19 @@ func (r *runner) request(ctx context.Context, index, keyIndex int, method string
 		out.Error = "response read failed"
 		return out
 	}
+	if missing && response.StatusCode == 404 {
+		out.Incorrect = out.Node == "" || response.Header.Get("ETag") != ""
+		return out
+	}
+	if missing && response.StatusCode == 200 {
+		out.Incorrect = true
+		return out
+	}
 	if response.StatusCode != 200 {
 		out.Error = "non-200 response"
+		if response.StatusCode == 404 {
+			out.Incorrect = true
+		}
 		return out
 	}
 	if method == "PUT" {

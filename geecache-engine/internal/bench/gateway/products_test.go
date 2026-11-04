@@ -24,7 +24,7 @@ func TestDatasetRejectsEncodedContentOverflow(t *testing.T) {
 	c = config("http://localhost:8000")
 	c.Scenario = "arrival"
 	if Validate(c) == nil {
-		t.Fatal("unimplemented arrival scenario accepted")
+		t.Fatal("arrival without stages accepted")
 	}
 }
 func TestMixedDatasetKeepsExactEncodedSizes(t *testing.T) {

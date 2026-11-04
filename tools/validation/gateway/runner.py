@@ -73,6 +73,11 @@ def run_suite(ctx):
         assert ctx.extended
         return continue_retained_experiment(ctx, continuation)
     proxies = prepare(ctx)
+    if ctx.arrival:
+        from .arrival import measure
+        measure(ctx, proxies)
+        ctx.snapshot('success')
+        return
     if ctx.performance:
         from .performance import measure
         measure(ctx, proxies)

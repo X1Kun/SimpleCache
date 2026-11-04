@@ -19,6 +19,9 @@ func Run(ctx context.Context, c Config, dir string) (Summary, error) {
 	if e := Validate(c); e != nil {
 		return Summary{}, e
 	}
+	if c.Scenario == "arrival" {
+		return runArrival(ctx, c, dir)
+	}
 	if e := os.MkdirAll(dir, 0755); e != nil {
 		return Summary{}, e
 	}
