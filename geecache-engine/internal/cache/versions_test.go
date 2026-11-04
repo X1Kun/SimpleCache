@@ -34,7 +34,7 @@ func TestVersionEventsPreserveNewerValuesAndForceKeepsFloor(t *testing.T) {
 		loads.Add(1)
 		return sourceValue(version.Load()), nil
 	}), Options{})
-	if _, err := g.GetDirect(ctx, "key"); err != nil {
+	if _, err := g.Get(ctx, "key"); err != nil {
 		t.Fatal(err)
 	}
 	epoch := g.currentEpoch("key")
@@ -46,7 +46,7 @@ func TestVersionEventsPreserveNewerValuesAndForceKeepsFloor(t *testing.T) {
 	if g.currentEpoch("key") != epoch || g.knownVersion("key") != 4 {
 		t.Fatal("old events changed the fence or decreased the floor")
 	}
-	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 4 || loads.Load() != 1 {
+	if v, err := g.Get(ctx, "key"); err != nil || v.Version() != 4 || loads.Load() != 1 {
 		t.Fatal(v, err, loads.Load())
 	}
 	if err := g.Invalidate("key"); err != nil {
@@ -56,17 +56,17 @@ func TestVersionEventsPreserveNewerValuesAndForceKeepsFloor(t *testing.T) {
 		t.Fatal("force invalidation forgot known source version")
 	}
 	version.Store(3)
-	if _, err := g.GetDirect(ctx, "key"); !errors.Is(err, ErrStaleVersion) {
+	if _, err := g.Get(ctx, "key"); !errors.Is(err, ErrStaleVersion) {
 		t.Fatal("accepted an old source after force invalidation", err)
 	}
 	version.Store(5)
-	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 5 {
+	if v, err := g.Get(ctx, "key"); err != nil || v.Version() != 5 {
 		t.Fatal(v, err)
 	}
 	for _, v := range []int64{1, 4, 3} {
 		_ = g.InvalidateVersion("key", v)
 	}
-	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 5 {
+	if v, err := g.Get(ctx, "key"); err != nil || v.Version() != 5 {
 		t.Fatal("replayed delete/update evicted a recreated generation", v, err)
 	}
 }
@@ -90,14 +90,14 @@ func TestVersionedNotificationRejectsLateFillAndSeparatesFlights(t *testing.T) {
 		return sourceValue(2), nil
 	}), Options{SourceTimeout: 2 * time.Second})
 	old := make(chan error, 1)
-	go func() { _, e := g.GetDirect(ctx, "key"); old <- e }()
+	go func() { _, e := g.Get(ctx, "key"); old <- e }()
 	select {
 	case <-started:
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
 	_ = g.InvalidateVersion("key", 2)
-	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 2 {
+	if v, err := g.Get(ctx, "key"); err != nil || v.Version() != 2 {
 		t.Fatal("new caller joined old work", v, err)
 	}
 	epoch := g.currentEpoch("key")
@@ -110,7 +110,7 @@ func TestVersionedNotificationRejectsLateFillAndSeparatesFlights(t *testing.T) {
 	if err := <-old; err != nil {
 		t.Fatal("late source did not recover using the newer cached version", err)
 	}
-	if v, err := g.GetDirect(ctx, "key"); err != nil || v.Version() != 2 || calls.Load() != 2 {
+	if v, err := g.Get(ctx, "key"); err != nil || v.Version() != 2 || calls.Load() != 2 {
 		t.Fatal(v, err, calls.Load())
 	}
 }
@@ -129,7 +129,7 @@ func TestDuplicateEventDoesNotDetachLoadingCurrentVersion(t *testing.T) {
 	}), Options{SourceTimeout: 2 * time.Second})
 	_ = g.InvalidateVersion("key", 2)
 	done := make(chan error, 1)
-	go func() { _, e := g.GetDirect(context.Background(), "key"); done <- e }()
+	go func() { _, e := g.Get(context.Background(), "key"); done <- e }()
 	<-started
 	epoch := g.currentEpoch("key")
 	_ = g.InvalidateVersion("key", 2)
@@ -160,7 +160,7 @@ func TestFloorRetirementFencesWorkAndRetainsItsCapturedMinimum(t *testing.T) {
 			g.floors.capacity = 2
 			_ = g.InvalidateVersion("key", 2)
 			done := make(chan error, 1)
-			go func() { _, e := g.GetDirect(context.Background(), "key"); done <- e }()
+			go func() { _, e := g.Get(context.Background(), "key"); done <- e }()
 			<-started
 			before := g.currentEpoch("key")
 			// Avoid stripe collisions: only retirement itself may advance this key's epoch.
@@ -214,7 +214,7 @@ func TestVersionComparisonDoesNotRefreshCacheRecencyOrTTL(t *testing.T) {
 		return SourceValue{Value: []byte("x"), Version: 1}, nil
 	}), Options{})
 	for _, k := range []string{"a", "b"} {
-		_, _ = g.GetDirect(context.Background(), k)
+		_, _ = g.Get(context.Background(), k)
 	}
 	before, _ := g.mainCache.lru.Peek("a")
 	deadline := before.(ByteView).expiresAt
@@ -223,132 +223,9 @@ func TestVersionComparisonDoesNotRefreshCacheRecencyOrTTL(t *testing.T) {
 	if after.(ByteView).expiresAt != deadline {
 		t.Fatal("notification renewed TTL")
 	}
-	_, _ = g.GetDirect(context.Background(), "c")
+	_, _ = g.Get(context.Background(), "c")
 	if g.mainCache.version("a") != 0 || g.mainCache.version("b") != 1 {
 		t.Fatal("version comparison changed recency")
-	}
-}
-
-type oldVersionPeer struct {
-	version int64
-	err     error
-}
-
-func (p oldVersionPeer) PickPeer(string) (PeerGetter, bool) { return p, true }
-func (p oldVersionPeer) Get(ctx context.Context, g, k string) ([]byte, error) {
-	v, e := p.GetWithExpiry(ctx, g, k)
-	return v.Value, e
-}
-func (p oldVersionPeer) GetWithExpiry(context.Context, string, string) (PeerValue, error) {
-	return PeerValue{Value: []byte("old"), Version: p.version, ExpiresAt: time.Now().Add(time.Minute)}, p.err
-}
-
-func TestKnownFloorRejectsOldAndUnversionedPeersWithoutHotCopies(t *testing.T) {
-	for _, hot := range []int64{0, 128} {
-		for _, pv := range []int64{0, 1} {
-			t.Run(fmt.Sprintf("hot-%d-peer-%d", hot, pv), func(t *testing.T) {
-				g := NewGroup("peer-floor", 1024, versionGetterFunc(func(context.Context, string) (SourceValue, error) { return sourceValue(2), nil }), Options{Peers: oldVersionPeer{version: pv}, HotCacheBytes: hot})
-				_ = g.InvalidateVersion("key", 2)
-				v, e := g.Get(context.Background(), "key")
-				if e != nil || v.Version() != 2 || g.Stats().HotEntries != 0 {
-					t.Fatal("stale Peer did not fall back to primary", v, e, g.Stats())
-				}
-			})
-		}
-	}
-	g := NewGroup("peer-miss", 1024, versionGetterFunc(func(context.Context, string) (SourceValue, error) { return sourceValue(3), nil }), Options{Peers: oldVersionPeer{err: ErrNotFound}})
-	_ = g.InvalidateVersion("key", 3)
-	if v, e := g.Get(context.Background(), "key"); e != nil || v.Version() != 3 {
-		t.Fatal("unversioned Peer absence hid a known generation", v, e)
-	}
-}
-
-type heldOldPeer struct{ started, release chan struct{} }
-
-func (p heldOldPeer) PickPeer(string) (PeerGetter, bool) { return p, true }
-func (p heldOldPeer) Get(ctx context.Context, _, _ string) ([]byte, error) {
-	close(p.started)
-	select {
-	case <-p.release:
-		return []byte("old"), nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-func TestRetiredRouteFloorSurvivesFallbackAndDoesNotJoinWeakerWork(t *testing.T) {
-	for _, pending := range []bool{false, true} {
-		t.Run(fmt.Sprint(pending), func(t *testing.T) {
-			peer := heldOldPeer{make(chan struct{}), make(chan struct{}, 1)}
-			defer close(peer.release)
-			sourceStarted, releaseSource := make(chan struct{}), make(chan struct{}, 1)
-			defer close(releaseSource)
-			var calls atomic.Int32
-			g := NewGroup("inherited-floor", 1024, versionGetterFunc(func(ctx context.Context, _ string) (SourceValue, error) {
-				if calls.Add(1) == 1 {
-					close(sourceStarted)
-					if pending {
-						select {
-						case <-releaseSource:
-						case <-ctx.Done():
-							return SourceValue{}, ctx.Err()
-						}
-					}
-					return sourceValue(1), nil
-				}
-				return sourceValue(2), nil
-			}), Options{Peers: peer, SourceTimeout: 2 * time.Second, RouteTimeout: 3 * time.Second})
-			g.floors.capacity = 2
-			_ = g.InvalidateVersion("key", 2)
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-			defer cancel()
-			strong := make(chan error, 1)
-			go func() {
-				v, e := g.Get(ctx, "key")
-				if e == nil && v.Version() != 2 {
-					e = fmt.Errorf("inherited floor lost: %d", v.Version())
-				}
-				strong <- e
-			}()
-			<-peer.started
-			added := 0
-			for i := 0; added < 2; i++ {
-				key := fmt.Sprintf("other-%d", i)
-				if g.epochBucket(key) != g.epochBucket("key") {
-					_ = g.InvalidateVersion(key, 1)
-					added++
-				}
-			}
-			if g.knownVersion("key") != 0 {
-				t.Fatal("fixture did not retire floor")
-			}
-			weak := make(chan error, 1)
-			go func() { _, e := g.GetDirect(ctx, "key"); weak <- e }()
-			<-sourceStarted
-			if !pending {
-				if e := <-weak; e != nil {
-					t.Fatal(e)
-				}
-			}
-			peer.release <- struct{}{}
-			select {
-			case e := <-strong:
-				if e != nil {
-					t.Fatal(e)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("strong fallback joined weaker source work")
-			}
-			if pending {
-				releaseSource <- struct{}{}
-				if e := <-weak; e != nil {
-					t.Fatal("weak result did not recover from newer cache", e)
-				}
-			}
-			if g.mainCache.version("key") != 2 || calls.Load() != 2 {
-				t.Fatal(g.Stats(), calls.Load())
-			}
-		})
 	}
 }
 

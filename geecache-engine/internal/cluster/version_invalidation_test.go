@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"context"
@@ -20,10 +20,10 @@ func (s fixedVersionSource) GetVersioned(context.Context, string) (cache.SourceV
 	return cache.SourceValue{Value: []byte("value"), Version: s.version}, nil
 }
 
-func TestVersionedPeerNotificationsValidateBeforeInvalidatingAndAcknowledge(t *testing.T) {
+func TestVersionedMemberNotificationsValidateBeforeInvalidatingAndAcknowledge(t *testing.T) {
 	g := cache.NewGroup("products", 1024, fixedVersionSource{4}, cache.Options{})
 	handler := NewHandlerWithToken("token", g)
-	_, _ = g.GetDirect(context.Background(), "key")
+	_, _ = g.Get(context.Background(), "key")
 	for _, raw := range []string{"", "0", "-1", "01", "+2", "2, 3", "invalid", "9223372036854775808"} {
 		req := httptest.NewRequest("DELETE", BasePath+"products/key", nil)
 		req.Header.Set("Authorization", "Bearer token")
@@ -60,7 +60,7 @@ func TestVersionedPeerNotificationsValidateBeforeInvalidatingAndAcknowledge(t *t
 	if e := client.InvalidateVersion(context.Background(), "products", "key", 5); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := g.GetDirect(context.Background(), "key"); !errors.Is(e, cache.ErrStaleVersion) {
+	if _, e := g.Get(context.Background(), "key"); !errors.Is(e, cache.ErrStaleVersion) {
 		t.Fatal("notification version did not reach group", e)
 	}
 	if e := client.Invalidate(context.Background(), "products", "key"); e != nil {
@@ -68,11 +68,11 @@ func TestVersionedPeerNotificationsValidateBeforeInvalidatingAndAcknowledge(t *t
 	}
 }
 
-func TestVersionedBroadcastReportsLegacyPeersWithoutClaimingVersionSupport(t *testing.T) {
+func TestVersionedBroadcastReportsLegacyMembersWithoutClaimingVersionSupport(t *testing.T) {
 	local := cache.NewGroup("products", 1024, fixedVersionSource{1}, cache.Options{})
 	remote := cache.NewGroup("products", 1024, fixedVersionSource{1}, cache.Options{})
-	_, _ = local.GetDirect(context.Background(), "key")
-	_, _ = remote.GetDirect(context.Background(), "key")
+	_, _ = local.Get(context.Background(), "key")
+	_, _ = remote.Get(context.Background(), "key")
 	modern := httptest.NewServer(NewHandlerWithToken("token", remote))
 	defer modern.Close()
 	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -34,7 +34,7 @@ func TestDesiredSubsetDefaultsAndEndpointRemoval(t *testing.T) {
 	if err := validateSpec(cr); err != nil {
 		t.Fatal(err)
 	}
-	cr.Spec.HotCacheBytes = 1024
+	cr.Name = "bad.name"
 	if err := validateSpec(cr); err == nil {
 		t.Fatal("gateway accepted hot replicas")
 	}

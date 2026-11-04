@@ -74,9 +74,6 @@ func (g *Group) loadSource(work context.Context, key string, fence readFence) (s
 	valid := fence.epoch == g.epochs[g.epochBucket(key)] && !stale
 	if valid {
 		view = g.mainCache.add(key, view, g.opts.TTL)
-		if g.opts.HotCacheBytes > 0 {
-			g.hotCache.remove(key)
-		}
 	}
 	g.epochMu.Unlock()
 	if stale {

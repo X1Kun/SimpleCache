@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -19,7 +19,7 @@ import (
 func ptr[T any](v T) *T { return &v }
 func slice(name, ip string, ready *bool) *discoveryv1.EndpointSlice {
 	return &discoveryv1.EndpointSlice{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "demo", Labels: map[string]string{discoveryv1.LabelServiceName: "cache-svc"}},
-		AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Name: ptr("peer"), Port: ptr(int32(8001))}},
+		AddressType: discoveryv1.AddressTypeIPv4, Ports: []discoveryv1.EndpointPort{{Name: ptr("cluster"), Port: ptr(int32(8001))}},
 		Endpoints: []discoveryv1.Endpoint{{Addresses: []string{ip}, Conditions: discoveryv1.EndpointConditions{Ready: ready}, TargetRef: &corev1.ObjectReference{Kind: "Pod", Name: name, Namespace: "demo"}}}}
 }
 
@@ -43,7 +43,7 @@ func TestWatchFailureRetainsLastValidMembers(t *testing.T) {
 	client.PrependWatchReactor("endpointslices", func(ktesting.Action) (bool, watch.Interface, error) {
 		return true, nil, errors.New("simulated watch interruption")
 	})
-	router := peer.NewRouter("entry", time.Second)
+	router := cluster.NewDirectory("entry", time.Second, "")
 	defer router.Close()
 	w, err := New(client, "demo", "cache-svc", router)
 	if err != nil {
@@ -89,7 +89,7 @@ func TestMemberFiltering(t *testing.T) {
 }
 func TestInformerAddDeleteAndAddressChange(t *testing.T) {
 	client := fake.NewClientset(slice("a", "10.0.0.1", ptr(true)))
-	router := peer.NewRouter("demo/a", time.Second)
+	router := cluster.NewDirectory("demo/a", time.Second, "")
 	defer router.Close()
 	watcher, err := New(client, "demo", "cache-svc", router)
 	if err != nil {

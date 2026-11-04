@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"context"
@@ -16,11 +16,11 @@ func TestBroadcastInvalidatesEveryKnownCopyAndReportsFailures(t *testing.T) {
 	newGroup := func() *cache.Group {
 		return cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
 			return []byte("value"), nil
-		}), cache.Options{Peers: forbiddenPicker{}})
+		}), cache.Options{})
 	}
 	local, remote := newGroup(), newGroup()
 	for _, group := range []*cache.Group{local, remote} {
-		if _, err := group.GetLocal(context.Background(), "a/b +中文"); err != nil {
+		if _, err := group.Get(context.Background(), "a/b +中文"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -30,7 +30,7 @@ func TestBroadcastInvalidatesEveryKnownCopyAndReportsFailures(t *testing.T) {
 		<-r.Context().Done()
 	}))
 	defer broken.Close()
-	router := NewRouterWithToken("local", 50*time.Millisecond, token)
+	router := NewDirectory("local", 50*time.Millisecond, token)
 	defer router.Close()
 	if err := router.Update([]Member{
 		{ID: "remote", Address: strings.TrimPrefix(server.URL, "http://")},
@@ -47,16 +47,16 @@ func TestBroadcastInvalidatesEveryKnownCopyAndReportsFailures(t *testing.T) {
 	}
 	for _, result := range report.Results {
 		if result.Node == "broken" && result.Status == "ok" {
-			t.Fatal("failed peer reported success")
+			t.Fatal("failed member reported success")
 		}
 	}
 }
 
-func TestPeerInvalidationRequiresTokenAndNeverForwards(t *testing.T) {
+func TestMemberInvalidationRequiresTokenAndNeverForwards(t *testing.T) {
 	g := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
 		return []byte("value"), nil
-	}), cache.Options{Peers: forbiddenPicker{}})
-	_, _ = g.GetLocal(context.Background(), "key")
+	}), cache.Options{})
+	_, _ = g.Get(context.Background(), "key")
 	for _, tc := range []struct {
 		token  string
 		status int
@@ -75,6 +75,25 @@ func TestPeerInvalidationRequiresTokenAndNeverForwards(t *testing.T) {
 	w := httptest.NewRecorder()
 	NewHandler(g).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, BasePath+"products/key", nil))
 	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatal("read-only peer accepted mutation")
+		t.Fatal("read-only member accepted mutation")
+	}
+}
+
+func clientFor(server *httptest.Server) *Client {
+	return &Client{address: strings.TrimPrefix(server.URL, "http://"), http: server.Client(), timeout: time.Second}
+}
+
+func TestMemberTransportNeverServesReads(t *testing.T) {
+	g := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
+		t.Fatal("notification transport loaded source")
+		return nil, nil
+	}), cache.Options{})
+	h := NewHandlerWithToken("token", g)
+	for _, path := range []string{BasePath + "products/key", "/_geecache/products/key"} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 405 || w.Header().Get("Allow") != "DELETE" {
+			t.Fatal(path, w.Code, w.Header())
+		}
 	}
 }

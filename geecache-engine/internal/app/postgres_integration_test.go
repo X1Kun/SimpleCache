@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"net/http/httptest"
 	"os"
 	"strconv"
@@ -29,7 +29,7 @@ func TestPostgresProductLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key := fmt.Sprintf("integration:%d", time.Now().UnixNano())
+	key := fmt.Sprintf("integration-%d", time.Now().UnixNano())
 	defer store.Close()
 	defer func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 3*time.Second)
@@ -43,7 +43,7 @@ func TestPostgresProductLifecycle(t *testing.T) {
 	}
 	nodes := productCluster(t, store)
 	for _, node := range nodes {
-		if _, err := node.group.GetLocal(ctx, key); err != nil {
+		if _, err := node.group.Get(ctx, key); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -128,7 +128,7 @@ func TestPostgresVersionedInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	counted := &countingProducts{MutableSource: store}
-	nodes := productClusterWithRouting(t, counted, 0, true)
+	nodes := productCluster(t, counted)
 	readAll := func(version int64) {
 		t.Helper()
 		for _, n := range nodes {
@@ -153,7 +153,7 @@ func TestPostgresVersionedInvalidation(t *testing.T) {
 		t.Helper()
 		r := httptest.NewRequest("POST", "/invalidate?key="+key, nil)
 		r.Header.Set("Authorization", "Bearer test-token")
-		r.Header.Set(peer.InvalidationVersionHeader, strconv.FormatInt(version, 10))
+		r.Header.Set(cluster.InvalidationVersionHeader, strconv.FormatInt(version, 10))
 		w := httptest.NewRecorder()
 		nodes[2].api.ServeHTTP(w, r)
 		if w.Code != 200 {

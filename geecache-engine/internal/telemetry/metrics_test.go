@@ -49,7 +49,7 @@ func TestVersionGuardMetricsExposeBoundedRecordsAndRejectedLoads(t *testing.T) {
 	if err := g.InvalidateVersion("target", 2); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := g.GetDirect(context.Background(), "target"); !errors.Is(err, cache.ErrStaleVersion) {
+	if _, err := g.Get(context.Background(), "target"); !errors.Is(err, cache.ErrStaleVersion) {
 		t.Fatal(err)
 	}
 	_ = g.InvalidateVersion("target", 2)

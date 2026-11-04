@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"context"

@@ -3,7 +3,7 @@ package validation
 
 import (
 	"context"
-	"crypto/sha256"
+
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +19,6 @@ import (
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/app"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer/hashring"
 )
 
 func evidence(t *testing.T, data any) {
@@ -91,7 +89,7 @@ func TestDistinctKeysRespectSourceLimit(t *testing.T) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-	}), cache.Options{MaxMissWaiters: 256, Limiter: cache.NewSourceLimiterWithQueue(8, 256), SourceTimeout: 2 * time.Second, RouteTimeout: 3 * time.Second})
+	}), cache.Options{MaxMissWaiters: 256, Limiter: cache.NewSourceLimiterWithQueue(8, 256), SourceTimeout: 2 * time.Second})
 	burst(t, 256, func(i int) error {
 		key := fmt.Sprint(i)
 		v, e := g.Get(context.Background(), key)
@@ -123,7 +121,7 @@ func TestOverloadTimesOutAndRecovers(t *testing.T) {
 			return nil, ctx.Err()
 		}
 		return []byte(key), nil
-	}), cache.Options{Limiter: cache.NewSourceLimiter(2), SourceTimeout: 50 * time.Millisecond, RouteTimeout: 300 * time.Millisecond})
+	}), cache.Options{Limiter: cache.NewSourceLimiter(2), SourceTimeout: 50 * time.Millisecond})
 	start := time.Now()
 	burst(t, 128, func(i int) error {
 		_, e := g.Get(context.Background(), fmt.Sprint(i))
@@ -163,65 +161,8 @@ func TestCapacityEvictionAndReload(t *testing.T) {
 	}
 }
 
-func TestHashMappingExpansion(t *testing.T) {
-	a, b := hashring.New(100, nil), hashring.New(100, nil)
-	a.Add("test/cache-0", "test/cache-1", "test/cache-2")
-	b.Add("test/cache-0", "test/cache-1", "test/cache-2", "test/cache-3")
-	before, after := map[string]int{}, map[string]int{}
-	moved := 0
-	for i := 0; i < 100000; i++ {
-		key := fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("seed-42-key-%d", i))))
-		x, y := a.Get(key), b.Get(key)
-		before[x]++
-		after[y]++
-		if x != y {
-			moved++
-			if y != "test/cache-3" {
-				t.Fatal("existing owners changed among themselves")
-			}
-		}
-	}
-	evidence(t, map[string]any{"keys": 100000, "seed": 42, "before": before, "after": after, "moved_fraction": float64(moved) / 100000, "reference_fraction": 0.25})
-	if moved == 0 || moved == 100000 {
-		t.Fatal("expansion did not move a subset")
-	}
-}
-
-func TestStalePeerTimeoutFallbackAndRecovery(t *testing.T) {
-	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
-	defer stale.Close()
-	// Use the deployed timeout budget; a 40ms healthy-path assertion is noisy
-	// when race instrumentation and another local cluster share this host.
-	router := peer.NewRouter("entry", 300*time.Millisecond)
-	defer router.Close()
-	if e := router.Update([]peer.Member{{ID: "owner", Address: strings.TrimPrefix(stale.URL, "http://")}}); e != nil {
-		t.Fatal(e)
-	}
-	var localCalls atomic.Int64
-	entry := cache.NewGroup("scores", 1<<20, cache.GetterFunc(func(_ context.Context, key string) ([]byte, error) { localCalls.Add(1); return []byte(key), nil }), cache.Options{Peers: router})
-	start := time.Now()
-	burst(t, 128, func(int) error {
-		v, e := entry.Get(context.Background(), "fallback")
-		if e == nil && v.String() != "fallback" {
-			return errors.New("wrong value")
-		}
-		return e
-	})
-	if localCalls.Load() != 1 {
-		t.Fatalf("fallback source calls=%d", localCalls.Load())
-	}
-	owner := cache.NewGroup("scores", 1<<20, cache.GetterFunc(func(_ context.Context, key string) ([]byte, error) { return []byte(key), nil }), cache.Options{})
-	healthy := httptest.NewServer(peer.NewHandler(owner))
-	defer healthy.Close()
-	if e := router.Update([]peer.Member{{ID: "owner", Address: strings.TrimPrefix(healthy.URL, "http://")}}); e != nil {
-		t.Fatal(e)
-	}
-	v, e := entry.Get(context.Background(), "fresh-after-recovery")
-	evidence(t, map[string]any{"waiters": 128, "peer_timeout_ms": 300, "fallback_source_calls": localCalls.Load(), "elapsed_ms": time.Since(start).Milliseconds()})
-	if e != nil || v.String() != "fresh-after-recovery" || localCalls.Load() != 1 {
-		t.Fatalf("fallback/recovery: %v calls=%d", e, localCalls.Load())
-	}
-}
+// Use the deployed timeout budget; a 40ms healthy-path assertion is noisy
+// when race instrumentation and another local cluster share this host.
 
 // Baselines use real HTTP handlers on loopback with a synthetic 2ms source.
 // They are not deployed-Pod throughput numbers and do not include race overhead.

@@ -1,29 +1,22 @@
 # Workloads and diagnostics
 
-These packages are tools within the existing engine Go module. The production
-`cmd/simplecache` dependency graph must not import `internal/bench` or
-`internal/validation`. Workload/fixture processes can use runtime packages to
-exercise real behavior. Runtime tests stay next to their implementation.
+Production `cmd/simplecache` must not import benchmark or validation packages.
+Tools can use runtime contracts; runtime tests stay alongside their implementation.
 
 | Package | Responsibility | Executable |
 | --- | --- | --- |
-| `gateway` | Deterministic Gateway workload client and response validation | `cmd/gateway-bench` |
-| `postgres` | Paired PostgreSQL/cache subprocess experiments | `cmd/postgres-compare` |
-| `diagnostics` | Separate-process synthetic baselines and server profiles | `cmd/diagnostic-bench` |
-| `../validation/report` | Go test/Ginkgo/profile evidence parsing and reports | `cmd/validation-report` |
-| `../validation/scenarios` | Bounded adversarial engine tests and profiles | `go test` via `make validate` |
+| `gateway` | Gateway workloads, bounded arrival scheduling, cohorts and correctness evidence | `cmd/gateway-bench` |
+| `gateway` / reference fixture | Independent in-memory client calibration | `cmd/arrival-reference` |
+| `diagnostics` | Separate-process synthetic baselines and profiles | `cmd/diagnostic-bench` |
+| `../validation/report` | Go test/Ginkgo/profile evidence aggregation | `cmd/validation-report` |
+| `../validation/scenarios` | Bounded local-cache adversarial cases | `make validate` |
 
-Gateway files separate configuration (`config.go`), deterministic values/traces
-(`dataset.go`), request validation (`client.go`), measurement structures and
-quantiles (`records.go`), and run scheduling/evidence (`run.go`).
+The retired Peer-routing comparison and its independent PostgreSQL fixture runtime
+were removed. RoundRobin and consistent-hash controls both use Gateway and the
+same local-read engine. PostgreSQL arrival integration uses the production app
+assembly, including the relay. Archived profiles/reports retain their original
+binaries and must not be interpreted as results for a currently supported mode.
 
-The old package paths were `internal/gatewayperf`, `internal/productcompare`,
-`internal/diagnostics`, and `internal/validationreport`. These are internal Go
-imports; callers in this repository have moved. Executable names, CLI options,
-workload values, result schemas and report locations remain compatible.
-Historical pprof files must continue to use their original matching binaries.
-
-Workload-specific correctness rules and latency scopes remain distinct.
-`arrival.go` implements bounded open-loop scheduling and stage/cohort reports.
-See [arrival experiments](../../../docs/experiments/arrival.md) for fixture
-ownership, short real-runtime qualification, outcome rules and remaining work.
+See [arrival experiments](../../../docs/experiments/arrival.md) and
+[Kind experiments](../../../docs/experiments/arrival-kind.md) for scheduling,
+fixture ownership, qualification, resource sampling and interpretation limits.

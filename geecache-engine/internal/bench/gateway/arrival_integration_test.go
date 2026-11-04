@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	pgx "github.com/jackc/pgx/v5"
 	"io"
 	"net"
 	"net/http"
@@ -15,9 +16,8 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/app"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
-	"github.com/jackc/pgx/v5"
 )
 
 // This is the production application assembly (including relay), one node and
@@ -77,11 +77,11 @@ func TestArrivalRuntimeIntegration(t *testing.T) {
 		l.Close()
 		return address
 	}
-	peerAddr, apiAddr := reserve(), reserve()
+	clusterAddr, apiAddr := reserve(), reserve()
 	lifecycle, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() {
-		done <- app.RunWithSource(lifecycle, app.Config{PeerAddr: peerAddr, APIAddr: apiAddr, SelfID: "arrival", DiscoveryMode: "static", API: true, CacheBytes: 1 << 20, TTL: time.Minute, SourceConcurrency: 2, SourceMaxPending: 2, MaxMissWaiters: 16, Members: []peer.Member{{ID: "arrival", Address: peerAddr}}, SourceMode: "postgres", AdminToken: "test-only-token", ReadRoutingMode: "gateway"}, store)
+		done <- app.RunWithSource(lifecycle, app.Config{ClusterAddr: clusterAddr, APIAddr: apiAddr, SelfID: "arrival", DiscoveryMode: "static", API: true, CacheBytes: 1 << 20, TTL: time.Minute, SourceConcurrency: 2, SourceMaxPending: 2, MaxMissWaiters: 16, Members: []cluster.Member{{ID: "arrival", Address: clusterAddr}}, SourceMode: "postgres", AdminToken: "test-only-token"}, store)
 	}()
 	defer func() {
 		cancel()

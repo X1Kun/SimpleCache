@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	pgx "github.com/jackc/pgx/v5"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,10 +22,9 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/outbox"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/source/postgres"
-	"github.com/jackc/pgx/v5"
 )
 
 func deliveryPostgresFixture(t *testing.T) (context.Context, *postgres.Store, *pgx.Conn, string, string) {
@@ -146,13 +146,13 @@ func TestCommitCrashWriterProcess(t *testing.T) {
 	}
 	defer store.Close()
 	source := &commitBarrierProducts{Store: store, events: events}
-	router := peer.NewDirectory("writer", time.Second, "crash-test-token")
+	router := cluster.NewDirectory("writer", time.Second, "crash-test-token")
 	defer router.Close()
-	if err := router.Update([]peer.Member{{ID: "survivor", Address: os.Getenv("SIMPLECACHE_CONTRACT_PEER")}}); err != nil {
+	if err := router.Update([]cluster.Member{{ID: "survivor", Address: os.Getenv("SIMPLECACHE_CONTRACT_PEER")}}); err != nil {
 		t.Fatal(err)
 	}
 	group := cache.NewGroup("products", 1<<20, source, cache.Options{})
-	handler := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: source, Router: router, Token: "crash-test-token", DirectReads: true})
+	handler := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: source, Directory: router, Token: "crash-test-token"})
 	key := os.Getenv("SIMPLECACHE_CONTRACT_KEY")
 	if err := json.NewEncoder(events).Encode(writerEvent{Phase: "ready", Key: key}); err != nil {
 		t.Fatal(err)
@@ -179,12 +179,12 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 	}
 	survivor := cache.NewGroup("products", 1<<20, counted, cache.Options{TTL: ttl})
 	var notifications atomic.Int64
-	peerHandler := peer.NewHandlerWithToken("crash-test-token", survivor)
+	notificationHandler := cluster.NewHandlerWithToken("crash-test-token", survivor)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			notifications.Add(1)
 		}
-		peerHandler.ServeHTTP(w, r)
+		notificationHandler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(server.Close)
 	readEvents, writeEvents, err := os.Pipe()
@@ -259,7 +259,7 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 	// Finish child initialization first so the TTL window measures the crash,
 	// not process startup. No mutation is allowed before this parent command.
 	await("ready")
-	cached, err := survivor.GetDirect(ctx, key)
+	cached, err := survivor.Get(ctx, key)
 	if err != nil || cached.Version() != 10 || cached.String() != string(responseV10) {
 		t.Fatal(cached, err)
 	}
@@ -286,7 +286,7 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 	if notifications.Load() != 0 {
 		t.Fatal("broadcast occurred before the crash barrier", notifications.Load())
 	}
-	old, err := survivor.GetDirect(ctx, key)
+	old, err := survivor.Get(ctx, key)
 	if err != nil || old.Version() != 10 || old.String() != string(responseV10) || counted.reads.Load() != 1 {
 		t.Fatal("missed event did not preserve the warm stale copy", old, err, counted.reads.Load())
 	}
@@ -294,7 +294,7 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 		relayContext, stopRelay := context.WithCancel(ctx)
 		relayDone := make(chan struct{})
 		var relayErr error
-		config := Config{PeerAddr: "127.0.0.1:0", SelfID: "relay", DiscoveryMode: "static", SourceMode: "postgres", AdminToken: "crash-test-token", CacheBytes: 1 << 20, SourceConcurrency: 1, Members: []peer.Member{{ID: "survivor", Address: strings.TrimPrefix(server.URL, "http://")}}}
+		config := Config{ClusterAddr: "127.0.0.1:0", SelfID: "relay", DiscoveryMode: "static", SourceMode: "postgres", AdminToken: "crash-test-token", CacheBytes: 1 << 20, SourceConcurrency: 1, Members: []cluster.Member{{ID: "survivor", Address: strings.TrimPrefix(server.URL, "http://")}}}
 		go func() { defer close(relayDone); relayErr = RunWithSource(relayContext, config, store) }()
 		defer func() {
 			stopRelay()
@@ -326,7 +326,7 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 				t.Fatal(ctx.Err())
 			}
 		}
-		fresh, err := survivor.GetDirect(ctx, key)
+		fresh, err := survivor.Get(ctx, key)
 		if err != nil || fresh.Version() != 11 || fresh.String() != string(responseV11) || notifications.Load() < 1 || cached.RemainingTTL() <= 0 {
 			t.Fatal("durable replay failed before TTL", fresh, err)
 		}
@@ -348,7 +348,7 @@ func testCommitBeforeBroadcastCrash(t *testing.T, replay bool) {
 	case <-ctx.Done():
 		t.Fatal(ctx.Err())
 	}
-	fresh, err := survivor.GetDirect(ctx, key)
+	fresh, err := survivor.Get(ctx, key)
 	if err != nil || fresh.Version() != 11 || fresh.String() != string(responseV11) || counted.reads.Load() != 2 {
 		t.Fatal("expiry did not reload authoritative value", fresh, err, counted.reads.Load())
 	}
@@ -379,14 +379,14 @@ func TestPostgresOutboxDuplicateDelivery(t *testing.T) {
 	if version, err := store.PutIfVersion(ctx, key, newer, 11); err != nil || version != 12 {
 		t.Fatal(version, err)
 	}
-	if _, err := receiver.GetDirect(ctx, key); err != nil {
+	if _, err := receiver.Get(ctx, key); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(peer.NewHandlerWithToken("relay-token", receiver))
+	server := httptest.NewServer(cluster.NewHandlerWithToken("relay-token", receiver))
 	defer server.Close()
-	router := peer.NewDirectory("sender", time.Second, "relay-token")
+	router := cluster.NewDirectory("sender", time.Second, "relay-token")
 	defer router.Close()
-	if err := router.Update([]peer.Member{{ID: "receiver", Address: strings.TrimPrefix(server.URL, "http://")}}); err != nil {
+	if err := router.Update([]cluster.Member{{ID: "receiver", Address: strings.TrimPrefix(server.URL, "http://")}}); err != nil {
 		t.Fatal(err)
 	}
 	local := cache.NewGroup("products", 1024, store, cache.Options{})
@@ -413,7 +413,7 @@ func TestPostgresOutboxDuplicateDelivery(t *testing.T) {
 	if worked, err := restarted.Step(ctx); err != nil || !worked {
 		t.Fatal(worked, err)
 	}
-	value, err := receiver.GetDirect(ctx, key)
+	value, err := receiver.Get(ctx, key)
 	if err != nil || value.Version() != 12 || value.String() != string(newer) || counted.reads.Load() != 1 || sends != 2 {
 		t.Fatal("duplicate/old event evicted newer cache", value, err, counted.reads.Load(), sends)
 	}

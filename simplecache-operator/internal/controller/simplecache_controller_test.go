@@ -82,26 +82,6 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(k8sClient.Delete(ctx, cr)).To(Succeed())
 	})
 
-	It("reserves hot cache within the total budget and rejects an oversized reservation", func() {
-		cr.Spec.HotCacheBytes = 1 << 20
-		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
-		reconcileNow()
-		var sts appsv1.StatefulSet
-		Expect(k8sClient.Get(ctx, key, &sts)).To(Succeed())
-		env := map[string]string{}
-		for _, value := range sts.Spec.Template.Spec.Containers[0].Env {
-			env[value.Name] = value.Value
-		}
-		Expect(env["CACHE_BYTES"]).To(Equal("67108864"))
-		Expect(env["HOT_CACHE_BYTES"]).To(Equal("1048576"))
-		getCR()
-		cr.Spec.HotCacheBytes = cr.Spec.CacheBytes
-		Expect(k8sClient.Update(ctx, cr)).To(Succeed())
-		reconcileNow()
-		getCR()
-		Expect(meta.FindStatusCondition(cr.Status.Conditions, "Ready").Reason).To(Equal("InvalidSpec"))
-	})
-
 	It("defaults admission limits and preserves an explicitly disabled source queue", func() {
 		reconcileNow()
 		var sts appsv1.StatefulSet
@@ -169,7 +149,7 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(headless.Spec.ClusterIP).To(Equal(corev1.ClusterIPNone))
 		Expect(headless.Spec.PublishNotReadyAddresses).To(BeFalse())
 		Expect(headless.Spec.Ports).To(HaveLen(1))
-		Expect(headless.Spec.Ports[0].Name).To(Equal("peer"))
+		Expect(headless.Spec.Ports[0].Name).To(Equal("cluster"))
 		Expect(api.Spec.ClusterIP).NotTo(BeEmpty())
 		Expect(metav1.IsControlledBy(&api, cr)).To(BeTrue())
 		allocatedIP := api.Spec.ClusterIP
@@ -198,7 +178,7 @@ var _ = Describe("SimpleCache controller contract", func() {
 		Expect(environment).NotTo(HaveKey("PEERS"))
 		Expect(environment).NotTo(HaveKey("SELF_ADDR"))
 		Expect(environment["DISCOVERY_MODE"]).To(Equal("kubernetes"))
-		Expect(environment["PEER_SERVICE"]).To(Equal(headless.Name))
+		Expect(environment["CLUSTER_SERVICE"]).To(Equal(headless.Name))
 
 		By("reporting a progressing rollout without changing resources on repetition")
 		getCR()

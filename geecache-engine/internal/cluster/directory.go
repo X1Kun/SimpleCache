@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"fmt"
@@ -10,9 +10,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer/hashring"
 )
 
 type Member struct {
@@ -20,49 +17,30 @@ type Member struct {
 	Address string
 }
 type snapshot struct {
-	ring    *hashring.Map
 	clients map[string]*Client
 	members []Member
 }
-type Router struct {
-	selfID      string
-	client      *http.Client
-	timeout     time.Duration
-	token       string
-	updateMu    sync.Mutex
-	state       atomic.Pointer[snapshot]
-	readRouting bool
+type Directory struct {
+	selfID   string
+	client   *http.Client
+	timeout  time.Duration
+	token    string
+	updateMu sync.Mutex
+	state    atomic.Pointer[snapshot]
 }
 
-func NewRouter(selfID string, timeout time.Duration) *Router {
-	return NewRouterWithToken(selfID, timeout, "")
-}
-
-func NewRouterWithToken(selfID string, timeout time.Duration, token string) *Router {
-	return newRouter(selfID, timeout, token, true)
-}
-
-// NewDirectory keeps invalidation membership/clients without building a read
-// hash ring; Gateway-mode workers do not perform another routing decision.
-func NewDirectory(selfID string, timeout time.Duration, token string) *Router {
-	return newRouter(selfID, timeout, token, false)
-}
-
-func newRouter(selfID string, timeout time.Duration, token string, readRouting bool) *Router {
+func NewDirectory(selfID string, timeout time.Duration, token string) *Directory {
 	if selfID == "" || timeout <= 0 {
-		panic("invalid router identity or timeout")
+		panic("invalid directory identity or timeout")
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 128
 	transport.MaxIdleConnsPerHost = 32
-	r := &Router{selfID: selfID, timeout: timeout, token: token, readRouting: readRouting, client: &http.Client{
-		Transport: transport, Timeout: timeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}
+	r := &Directory{selfID: selfID, timeout: timeout, token: token, client: &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	_ = r.Update(nil)
 	return r
 }
-func (r *Router) Update(input []Member) error {
+func (r *Directory) Update(input []Member) error {
 	r.updateMu.Lock()
 	defer r.updateMu.Unlock()
 	members := append([]Member(nil), input...)
@@ -88,13 +66,7 @@ func (r *Router) Update(input []Member) error {
 		return nil
 	}
 	next := &snapshot{clients: make(map[string]*Client), members: normalized}
-	if r.readRouting {
-		next.ring = hashring.New(100, nil)
-	}
 	for _, m := range normalized {
-		if next.ring != nil {
-			next.ring.Add(m.ID)
-		}
 		next.clients[m.ID] = &Client{address: m.Address, http: r.client, timeout: r.timeout, token: r.token}
 	}
 	r.state.Store(next)
@@ -119,16 +91,5 @@ func sameMembers(a, b []Member) bool {
 	}
 	return true
 }
-func (r *Router) PickPeer(key string) (cache.PeerGetter, bool) {
-	s := r.state.Load()
-	if s.ring == nil {
-		return nil, false
-	}
-	id := s.ring.Get(key)
-	if id == "" || id == r.selfID {
-		return nil, false
-	}
-	return s.clients[id], true
-}
-func (r *Router) Members() []Member { return append([]Member(nil), r.state.Load().members...) }
-func (r *Router) Close()            { r.client.CloseIdleConnections() }
+func (r *Directory) Members() []Member { return append([]Member(nil), r.state.Load().members...) }
+func (r *Directory) Close()            { r.client.CloseIdleConnections() }

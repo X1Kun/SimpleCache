@@ -34,7 +34,7 @@ still rely on TTL/recovery. This is not global reader synchronization.
 
 - Claim one eligible event using `FOR UPDATE SKIP LOCKED`, incrementing its
   attempt/lease token. Claim is one short database statement.
-- Send outside database transactions with the existing bounded Peer fan-out.
+- Send outside database transactions with the existing bounded cluster notification fan-out.
 - Finish only if id/token still match and the lease has not expired. Successful
   delivery sets delivered_at; failure releases the lease with delayed eligibility.
 - Expired or unacknowledged claims are reclaimable. A stale worker cannot finish
@@ -51,7 +51,7 @@ be out of order and repeated, using the cache's existing version-aware rules.
 ## Lifecycle and maintenance
 
 The worker uses the existing Store pool, so its queries share that pool's budget.
-It is canceled/joined after HTTP drain and before Router/Store close. Cancellation
+It is canceled/joined after HTTP drain and before Directory/Store close. Cancellation
 can leave a lease; another worker recovers it after expiry. No environment knobs
 or distributed scheduler are introduced in this version.
 

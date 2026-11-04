@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"crypto/subtle"
@@ -9,20 +9,12 @@ import (
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 )
 
-const (
-	BasePath      = "/_geecache/"
-	MaxBodyBytes  = cache.MaxValueBytes + 1024
-	ErrorHeader   = "X-SimpleCache-Error"
-	TTLHeader     = "X-SimpleCache-TTL-Nanoseconds"
-	VersionHeader = "X-SimpleCache-Version"
-)
-
-var ErrGroupNotFound = errors.New("peer group not found")
+const BasePath = "/_simplecache/invalidate/"
 
 // Echoing the committed version confirms support for version-aware semantics.
 const InvalidationVersionHeader = "X-SimpleCache-Invalidation-Version"
 
-var ErrUnversionedInvalidation = errors.New("peer did not acknowledge version-aware invalidation")
+var ErrUnversionedInvalidation = errors.New("member did not acknowledge version-aware invalidation")
 
 // ParseInvalidationVersion accepts an absent header for legacy force invalidation.
 func ParseInvalidationVersion(header http.Header) (int64, error) {

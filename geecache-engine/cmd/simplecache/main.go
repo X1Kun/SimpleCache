@@ -11,8 +11,8 @@ import (
 )
 
 func main() {
-	port := flag.Int("port", 8002, "Peer HTTP port")
-	api := flag.Bool("api", false, "Serve API, health checks and metrics")
+	port := flag.Int("port", 8001, "Cluster invalidation HTTP port")
+	api := flag.Bool("api", true, "Serve API, health checks and metrics")
 	flag.Parse()
 	config, err := app.FromEnv(*port, *api)
 	if err != nil {

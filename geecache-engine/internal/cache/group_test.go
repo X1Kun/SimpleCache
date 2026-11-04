@@ -92,7 +92,7 @@ func TestSingleFlightAndCallerCancellation(t *testing.T) {
 	}), Options{SourceTimeout: time.Second})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := g.GetLocal(ctx, "key"); done <- err }()
+	go func() { _, err := g.Get(ctx, "key"); done <- err }()
 	<-started
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -103,7 +103,7 @@ func TestSingleFlightAndCallerCancellation(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			v, err := g.GetLocal(context.Background(), "key")
+			v, err := g.Get(context.Background(), "key")
 			if err != nil || v.String() != "value" {
 				t.Errorf("waiter: %v", err)
 			}
@@ -116,35 +116,6 @@ func TestSingleFlightAndCallerCancellation(t *testing.T) {
 	}
 }
 
-func TestRouteDeadlineDoesNotCancelIndependentSource(t *testing.T) {
-	started := make(chan struct{})
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	g := NewGroup(t.Name(), 1024, GetterFunc(func(ctx context.Context, _ string) ([]byte, error) {
-		close(started)
-		defer close(finished)
-		select {
-		case <-release:
-			return []byte("late"), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}), Options{RouteTimeout: 50 * time.Millisecond, SourceTimeout: time.Second})
-	done := make(chan error, 1)
-	go func() { _, err := g.Get(context.Background(), "key"); done <- err }()
-	<-started
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatal(err)
-	}
-	close(release)
-	<-finished
-	// Join the still registered source flight rather than starting duplicate work.
-	v, err := g.GetLocal(context.Background(), "key")
-	if err != nil || v.String() != "late" {
-		t.Fatalf("late source: %v", err)
-	}
-}
-
 func TestSourceSlotWaitUsesDeadline(t *testing.T) {
 	limiter := NewSourceLimiter(1)
 	if err := limiter.acquire(context.Background()); err != nil {
@@ -154,7 +125,7 @@ func TestSourceSlotWaitUsesDeadline(t *testing.T) {
 	var calls atomic.Int32
 	g := NewGroup(t.Name(), 1024, GetterFunc(func(context.Context, string) ([]byte, error) { calls.Add(1); return nil, nil }),
 		Options{Limiter: limiter, SourceTimeout: 30 * time.Millisecond})
-	if _, err := g.GetLocal(context.Background(), "key"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := g.Get(context.Background(), "key"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 	if calls.Load() != 0 {
@@ -194,7 +165,7 @@ func TestSharedSourceConcurrencyLimit(t *testing.T) {
 			if i%2 == 1 {
 				g = b
 			}
-			if _, err := g.GetLocal(context.Background(), fmt.Sprint(i)); err != nil {
+			if _, err := g.Get(context.Background(), fmt.Sprint(i)); err != nil {
 				t.Error(err)
 			}
 		}(i)

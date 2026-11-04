@@ -11,64 +11,60 @@ import (
 	"testing"
 )
 
-func TestConditionalProductWritesAcrossPeersAndHotCopies(t *testing.T) {
-	for _, hot := range []int64{0, 128 << 10} {
-		t.Run(fmt.Sprint(hot), func(t *testing.T) {
-			store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
-			nodes := productClusterWithHotBudget(t, store, hot)
-			for _, node := range nodes {
-				w := productRequest(node.api, "GET", "/api?key=key", "", "")
-				if w.Code != 200 || w.Header().Get("ETag") != `"v1"` {
-					t.Fatalf("source/Peer/hot lost version: %d %v", w.Code, w.Header())
-				}
-				// Repeated reads also cover admission to the optional hot area.
-				w = productRequest(node.api, "GET", "/api?key=key", "", "")
-				if w.Header().Get("ETag") != `"v1"` {
-					t.Fatal("cached version changed")
-				}
+func TestConditionalProductWritesAcrossLocalCaches(t *testing.T) {
+	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
+	nodes := productCluster(t, store)
+	for _, node := range nodes {
+		w := productRequest(node.api, "GET", "/api?key=key", "", "")
+		if w.Code != 200 || w.Header().Get("ETag") != `"v1"` {
+			t.Fatalf("local cache lost version: %d %v", w.Code, w.Header())
+		}
+		// Repeated reads also cover admission to the local cache.
+		w = productRequest(node.api, "GET", "/api?key=key", "", "")
+		if w.Header().Get("ETag") != `"v1"` {
+			t.Fatal("cached version changed")
+		}
+	}
+	apply := func(node int, method, body, condition string, want int, version int64) {
+		t.Helper()
+		w := productRequest(nodes[node].api, method, "/api?key=key", body, "test-token", condition)
+		if w.Code != want {
+			t.Fatalf("%s %s: %d %s", method, condition, w.Code, w.Body.String())
+		}
+		var result mutationResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if want == http.StatusPreconditionFailed {
+			if result.SourceCommitted == nil || *result.SourceCommitted || result.Invalidation != nil || result.SourceVersion != nil {
+				t.Fatal("failed condition was reported as a write or broadcast")
 			}
-			apply := func(node int, method, body, condition string, want int, version int64) {
-				t.Helper()
-				w := productRequest(nodes[node].api, method, "/api?key=key", body, "test-token", condition)
-				if w.Code != want {
-					t.Fatalf("%s %s: %d %s", method, condition, w.Code, w.Body.String())
-				}
-				var result mutationResponse
-				if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
-					t.Fatal(err)
-				}
-				if want == http.StatusPreconditionFailed {
-					if result.SourceCommitted == nil || *result.SourceCommitted || result.Invalidation != nil || result.SourceVersion != nil {
-						t.Fatal("failed condition was reported as a write or broadcast")
-					}
-				} else if result.SourceVersion == nil || *result.SourceVersion != version {
-					t.Fatalf("wrong committed version: %+v", result)
-				}
-			}
-			apply(0, "PUT", `{"v":2}`, `"v1"`, 200, 2)
-			apply(1, "PUT", `{"v":99}`, `"v1"`, 412, 0)
-			apply(2, "DELETE", "", `"v1"`, 412, 0)
-			for _, node := range nodes {
-				w := productRequest(node.api, "GET", "/api?key=key", "", "")
-				if w.Code != 200 || w.Body.String() != `{"v":2}` || w.Header().Get("ETag") != `"v2"` {
-					t.Fatalf("stale edit changed a new value: %d %s %v", w.Code, w.Body.String(), w.Header())
-				}
-			}
-			apply(1, "DELETE", "", `"v2"`, 200, 3)
-			for _, node := range nodes {
-				if w := productRequest(node.api, "GET", "/api?key=key", "", ""); w.Code != 404 {
-					t.Fatal("deleted copy survived")
-				}
-			}
-			apply(2, "PUT", `{"v":99}`, `"v1"`, 412, 0)
-			apply(2, "PUT", `{"v":4}`, "*", 200, 4)
-			apply(0, "DELETE", "", `"v2"`, 412, 0)
-			apply(0, "PUT", `{"v":99}`, "*", 412, 0)
-			v, err := store.GetVersioned(context.Background(), "key")
-			if err != nil || v.Version != 4 || string(v.Value) != `{"v":4}` {
-				t.Fatal(v, err)
-			}
-		})
+		} else if result.SourceVersion == nil || *result.SourceVersion != version {
+			t.Fatalf("wrong committed version: %+v", result)
+		}
+	}
+	apply(0, "PUT", `{"v":2}`, `"v1"`, 200, 2)
+	apply(1, "PUT", `{"v":99}`, `"v1"`, 412, 0)
+	apply(2, "DELETE", "", `"v1"`, 412, 0)
+	for _, node := range nodes {
+		w := productRequest(node.api, "GET", "/api?key=key", "", "")
+		if w.Code != 200 || w.Body.String() != `{"v":2}` || w.Header().Get("ETag") != `"v2"` {
+			t.Fatalf("stale edit changed a new value: %d %s %v", w.Code, w.Body.String(), w.Header())
+		}
+	}
+	apply(1, "DELETE", "", `"v2"`, 200, 3)
+	for _, node := range nodes {
+		if w := productRequest(node.api, "GET", "/api?key=key", "", ""); w.Code != 404 {
+			t.Fatal("deleted copy survived")
+		}
+	}
+	apply(2, "PUT", `{"v":99}`, `"v1"`, 412, 0)
+	apply(2, "PUT", `{"v":4}`, "*", 200, 4)
+	apply(0, "DELETE", "", `"v2"`, 412, 0)
+	apply(0, "PUT", `{"v":99}`, "*", 412, 0)
+	v, err := store.GetVersioned(context.Background(), "key")
+	if err != nil || v.Version != 4 || string(v.Value) != `{"v":4}` {
+		t.Fatal(v, err)
 	}
 }
 

@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 )
 
 type memoryProducts struct {
@@ -110,39 +110,24 @@ func (s *memoryProducts) DeleteIfVersion(_ context.Context, key string, expected
 
 type productNode struct {
 	group  *cache.Group
-	router *peer.Router
+	router *cluster.Directory
 	api    http.Handler
 }
 
 func productCluster(t *testing.T, store MutableSource) []productNode {
 	t.Helper()
-	return productClusterWithHotBudget(t, store, 0)
-}
-
-func productClusterWithHotBudget(t *testing.T, store MutableSource, hotBytes int64) []productNode {
-	t.Helper()
-	return productClusterWithRouting(t, store, hotBytes, false)
-}
-
-func productClusterWithRouting(t *testing.T, store MutableSource, hotBytes int64, direct bool) []productNode {
-	t.Helper()
 	const token = "test-token"
 	var nodes []productNode
-	var members []peer.Member
+	var members []cluster.Member
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("node-%d", i)
-		var router *peer.Router
-		if direct {
-			router = peer.NewDirectory(id, time.Second, token)
-		} else {
-			router = peer.NewRouterWithToken(id, time.Second, token)
-		}
+		router := cluster.NewDirectory(id, time.Second, token)
 		t.Cleanup(router.Close)
-		group := cache.NewGroup("products", 1<<20, store, cache.Options{Peers: router, HotCacheBytes: hotBytes})
-		server := httptest.NewServer(peer.NewHandlerWithToken(token, group))
+		group := cache.NewGroup("products", 1<<20, store, cache.Options{})
+		server := httptest.NewServer(cluster.NewHandlerWithToken(token, group))
 		t.Cleanup(server.Close)
-		members = append(members, peer.Member{ID: id, Address: strings.TrimPrefix(server.URL, "http://")})
-		api := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: store, Router: router, Token: token, DirectReads: direct})
+		members = append(members, cluster.Member{ID: id, Address: strings.TrimPrefix(server.URL, "http://")})
+		api := APIHandler(group, func() bool { return true }, nil, APIOptions{Store: store, Directory: router, Token: token})
 		nodes = append(nodes, productNode{group, router, api})
 	}
 	for _, node := range nodes {
@@ -171,42 +156,26 @@ func productRequest(handler http.Handler, method, path, body, token string, cond
 }
 
 func TestProductWriteBroadcastReadDeleteLifecycle(t *testing.T) {
-	for _, hotBytes := range []int64{0, 128 << 10} {
-		t.Run(fmt.Sprintf("hot-bytes-%d", hotBytes), func(t *testing.T) {
-			productWriteBroadcastReadDeleteLifecycle(t, hotBytes)
-		})
-	}
-}
-
-func productWriteBroadcastReadDeleteLifecycle(t *testing.T, hotBytes int64) {
-	t.Helper()
 	store := &memoryProducts{values: map[string][]byte{"product:42": []byte(`{"price":100}`)}}
-	nodes := productClusterWithHotBudget(t, store, hotBytes)
+
+	nodes := productCluster(t, store)
 	for _, node := range nodes {
-		w := productRequest(node.api, "GET", "/api?key=product:42", "", "")
+		w := productRequest(node.api, "GET", "/api?key=product%3A42", "", "")
 		if w.Code != 200 || w.Body.String() != `{"price":100}` {
 			t.Fatalf("read: %d %s", w.Code, w.Body.String())
 		}
 	}
-	if store.reads != 1 {
-		t.Fatalf("stable routing should share one source fill, got %d", store.reads)
+	if store.reads != 3 {
+		t.Fatalf("each local cache should fill once, got %d", store.reads)
 	}
-	if hotBytes > 0 {
-		totalHot := 0
-		for _, node := range nodes {
-			totalHot += node.group.Stats().HotEntries
-		}
-		if totalHot != 2 {
-			t.Fatalf("expected two actual HTTP peer replicas before mutation, got %d", totalHot)
-		}
-	}
+
 	// Populate fallback/historical copies when a node has no hot copy.
 	for _, node := range nodes {
-		if _, err := node.group.GetLocal(context.Background(), "product:42"); err != nil {
+		if _, err := node.group.Get(context.Background(), "product:42"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	w := productRequest(nodes[0].api, "PUT", "/api?key=product:42", `{"price":120}`, "test-token", `"v1"`)
+	w := productRequest(nodes[0].api, "PUT", "/api?key=product%3A42", `{"price":120}`, "test-token", `"v1"`)
 	var response mutationResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
@@ -222,28 +191,28 @@ func productWriteBroadcastReadDeleteLifecycle(t *testing.T, hotBytes int64) {
 	}
 	readsBefore := store.reads
 	for _, node := range nodes {
-		w := productRequest(node.api, "GET", "/api?key=product:42", "", "")
+		w := productRequest(node.api, "GET", "/api?key=product%3A42", "", "")
 		if w.Code != 200 || w.Body.String() != `{"price":120}` {
 			t.Fatalf("stale read after acknowledgement: %d %s", w.Code, w.Body.String())
 		}
 	}
-	if store.reads != readsBefore+1 {
-		t.Fatal("new value was not cached at the owner")
+	if store.reads != readsBefore+3 {
+		t.Fatal("each local cache should reload the committed value")
 	}
 	// A newly added product must not be rejected by a startup Bloom snapshot.
-	w = productRequest(nodes[1].api, "PUT", "/api?key=product:new", `{"price":1}`, "test-token", "*")
+	w = productRequest(nodes[1].api, "PUT", "/api?key=product%3Anew", `{"price":1}`, "test-token", "*")
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	if w = productRequest(nodes[2].api, "GET", "/api?key=product:new", "", ""); w.Code != 200 {
+	if w = productRequest(nodes[2].api, "GET", "/api?key=product%3Anew", "", ""); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
-	w = productRequest(nodes[1].api, "DELETE", "/api?key=product:42", "", "test-token", `"v2"`)
+	w = productRequest(nodes[1].api, "DELETE", "/api?key=product%3A42", "", "test-token", `"v2"`)
 	if w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
 	for _, node := range nodes {
-		if w := productRequest(node.api, "GET", "/api?key=product:42", "", ""); w.Code != 404 {
+		if w := productRequest(node.api, "GET", "/api?key=product%3A42", "", ""); w.Code != 404 {
 			t.Fatalf("deleted product returned %d", w.Code)
 		}
 	}
@@ -270,7 +239,7 @@ func TestMutationValidationAndManualInvalidation(t *testing.T) {
 		}
 	}
 	for _, node := range nodes {
-		_, _ = node.group.GetLocal(context.Background(), "key")
+		_, _ = node.group.Get(context.Background(), "key")
 	}
 	w := productRequest(nodes[0].api, "POST", "/invalidate?key=key", "", "test-token")
 	if w.Code != 200 {
@@ -294,7 +263,7 @@ func TestCommittedWriteReportsPartialBroadcast(t *testing.T) {
 	}))
 	defer failed.Close()
 	members := nodes[0].router.Members()
-	members = append(members, peer.Member{ID: "failed", Address: strings.TrimPrefix(failed.URL, "http://")})
+	members = append(members, cluster.Member{ID: "failed", Address: strings.TrimPrefix(failed.URL, "http://")})
 	if err := nodes[0].router.Update(members); err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +284,7 @@ func TestCommittedWriteReportsPartialBroadcast(t *testing.T) {
 func TestWriteErrorIsAmbiguousAndStillInvalidates(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}, writeErr: errors.New("connection lost")}
 	nodes := productCluster(t, store)
-	_, _ = nodes[1].group.GetLocal(context.Background(), "key")
+	_, _ = nodes[1].group.Get(context.Background(), "key")
 	w := productRequest(nodes[0].api, "PUT", "/api?key=key", `{"v":2}`, "test-token", `"v1"`)
 	var response mutationResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
@@ -331,7 +300,7 @@ func TestCallerDisconnectDoesNotCancelPostCommitBroadcast(t *testing.T) {
 	defer cancel()
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}, onPut: cancel}
 	nodes := productCluster(t, store)
-	_, _ = nodes[2].group.GetLocal(context.Background(), "key")
+	_, _ = nodes[2].group.Get(context.Background(), "key")
 	req := httptest.NewRequest("PUT", "/api?key=key", strings.NewReader(`{"v":2}`)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("If-Match", `"v1"`)
@@ -339,33 +308,6 @@ func TestCallerDisconnectDoesNotCancelPostCommitBroadcast(t *testing.T) {
 	nodes[0].api.ServeHTTP(w, req)
 	if w.Code != 200 || ctx.Err() == nil || nodes[2].group.Stats().Entries != 0 {
 		t.Fatalf("post-commit broadcast canceled: %d %s", w.Code, w.Body.String())
-	}
-}
-
-func TestSlowHealthyPeerDoesNotTriggerEarlyFallback(t *testing.T) {
-	owner := cache.NewGroup("products", 1024, cache.GetterFunc(func(ctx context.Context, _ string) ([]byte, error) {
-		timer := time.NewTimer(500 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return []byte("owner"), nil
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}), cache.Options{})
-	server := httptest.NewServer(peer.NewHandler(owner))
-	defer server.Close()
-	router := peer.NewRouter("entry", peerReadTimeout)
-	defer router.Close()
-	if err := router.Update([]peer.Member{{ID: "owner", Address: strings.TrimPrefix(server.URL, "http://")}}); err != nil {
-		t.Fatal(err)
-	}
-	entry := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
-		return nil, errors.New("unexpected fallback")
-	}), cache.Options{Peers: router})
-	v, err := entry.Get(context.Background(), "key")
-	if err != nil || v.String() != "owner" {
-		t.Fatalf("premature fallback: %q %v", v.String(), err)
 	}
 }
 
@@ -395,10 +337,10 @@ func TestMutationCoordinatorPreservesCommitAndInvalidationOutcomes(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			store := &memoryProducts{values: map[string][]byte{"key": []byte(`{"v":1}`)}}
 			group := cache.NewGroup("products", 1024, store, cache.Options{})
-			if _, err := group.GetDirect(context.Background(), "key"); err != nil {
+			if _, err := group.Get(context.Background(), "key"); err != nil {
 				t.Fatal(err)
 			}
-			router := peer.NewDirectory("local", time.Second, "token")
+			router := cluster.NewDirectory("local", time.Second, "token")
 			defer router.Close()
 			command := mutationCommand{kind: mutationPut, key: "key", value: []byte(`{"v":2}`), expected: 1}
 			switch name {

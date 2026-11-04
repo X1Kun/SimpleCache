@@ -1,15 +1,16 @@
 # SimpleCache Operator
 
-Kubebuilder controller for cache.x1kun.com/v1 SimpleCache. It manages a StatefulSet,
-peer/API Services, cache ServiceAccount and namespace discovery Role/Binding.
+Kubebuilder controller for `cache.x1kun.com/v1` SimpleCache. It manages a
+StatefulSet, notification/API Services, namespace discovery RBAC and optional
+Envoy Gateway resources. Each cache instance always reads locally. Without a
+Gateway, replicas are independent caches; key sharding requires `spec.gateway`.
 
-The [project guide](../docs/design.md#membership-operator-and-lifecycle) is the
-single source for the current CR fields, Reconcile behavior and controller
-boundaries. See its [deployment instructions](../docs/design.md#kubernetes-deployment),
-[validation](../docs/design.md#commands-and-reports), and
-[agreed roadmap](../docs/design.md#delivery-plan).
+The notification EndpointSlice port is `cluster`; runtime discovery uses
+`CLUSTER_SERVICE`. `hotCacheBytes` was removed from the CRD. See the
+[design and migration guide](../docs/design.md) for fields, API contracts,
+configuration and incompatible upgrade steps.
 
-From this module, use make manifests generate, make test, and make lint-fix for
-API generation, envtest and lint. Generated files must come from types/markers;
-preserve PROJECT and Kubebuilder scaffold markers. Repository CI lives in
-../.github/workflows.
+After API changes run `make manifests generate`; use `make lint-fix` and
+`make test` for lint/envtest. Generated CRDs, RBAC and deepcopy files must come
+from markers; preserve PROJECT and Kubebuilder scaffold markers. Real-cluster
+Gateway validation runs through the repository's uniquely owned Kind suites.

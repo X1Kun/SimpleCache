@@ -10,45 +10,46 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 )
 
 type Config struct {
-	PeerAddr, APIAddr, SelfID, DiscoveryMode string
-	Namespace, PeerService                   string
-	API                                      bool
-	CacheBytes                               int64
-	HotCacheBytes                            int64
-	TTL                                      time.Duration
-	SourceConcurrency                        int
-	SourceMaxPending                         int
-	MaxMissWaiters                           int
-	WriteConcurrency                         int
-	Members                                  []peer.Member
-	DebugAddr                                string
-	ProfileContention                        bool
-	SourceMode, DatabaseURL, AdminToken      string
-	ReadRoutingMode                          string
+	ClusterAddr, APIAddr, SelfID, DiscoveryMode string
+	Namespace, ClusterService                   string
+	API                                         bool
+	CacheBytes                                  int64
+	TTL                                         time.Duration
+	SourceConcurrency                           int
+	SourceMaxPending                            int
+	MaxMissWaiters                              int
+	WriteConcurrency                            int
+	Members                                     []cluster.Member
+	DebugAddr                                   string
+	ProfileContention                           bool
+	SourceMode, DatabaseURL, AdminToken         string
 }
 
 // FromEnv binds environment strings to a runtime configuration. Explicit zero
 // values for TTL/waiters/write concurrency remain invalid environment settings;
 // programmatic zero values retain their existing default semantics.
 func FromEnv(port int, api bool) (Config, error) {
-	c := Config{PeerAddr: fmt.Sprintf("0.0.0.0:%d", port), APIAddr: "0.0.0.0:9999", API: api,
+	for _, old := range []string{"READ_ROUTING_MODE", "HOT_CACHE_BYTES", "PEERS", "PEER_SERVICE"} {
+		if os.Getenv(old) != "" {
+			return Config{}, fmt.Errorf("%s was removed; use Gateway routing and MEMBERS/CLUSTER_SERVICE for invalidation discovery", old)
+		}
+	}
+
+	c := Config{ClusterAddr: fmt.Sprintf("0.0.0.0:%d", port), APIAddr: "0.0.0.0:9999", API: api,
 		CacheBytes: 64 << 20, TTL: time.Minute, SourceConcurrency: 32, SourceMaxPending: cache.DefaultSourcePending,
 		MaxMissWaiters: cache.DefaultMissWaiters, WriteConcurrency: DefaultWriteConcurrency,
-		DiscoveryMode: os.Getenv("DISCOVERY_MODE"), Namespace: os.Getenv("POD_NAMESPACE"), PeerService: os.Getenv("PEER_SERVICE"),
-		ReadRoutingMode: os.Getenv("READ_ROUTING_MODE"), SourceMode: os.Getenv("SOURCE_MODE"),
+		DiscoveryMode: os.Getenv("DISCOVERY_MODE"), Namespace: os.Getenv("POD_NAMESPACE"), ClusterService: os.Getenv("CLUSTER_SERVICE"),
+		SourceMode:  os.Getenv("SOURCE_MODE"),
 		DatabaseURL: os.Getenv("DATABASE_URL"), AdminToken: os.Getenv("CACHE_ADMIN_TOKEN"), DebugAddr: os.Getenv("DEBUG_ADDR")}
 	if port < 1 || port > 65535 {
-		return c, fmt.Errorf("invalid peer port")
+		return c, fmt.Errorf("invalid notification port")
 	}
 	if c.DiscoveryMode == "" {
 		c.DiscoveryMode = "static"
-	}
-	if c.ReadRoutingMode == "" {
-		c.ReadRoutingMode = "peer"
 	}
 	if c.SourceMode == "" {
 		c.SourceMode = "demo"
@@ -59,7 +60,7 @@ func FromEnv(port int, api bool) (Config, error) {
 	for _, item := range []struct {
 		name  string
 		value *int64
-	}{{"CACHE_BYTES", &c.CacheBytes}, {"HOT_CACHE_BYTES", &c.HotCacheBytes}} {
+	}{{"CACHE_BYTES", &c.CacheBytes}} {
 		if raw := os.Getenv(item.name); raw != "" {
 			n, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
@@ -98,7 +99,7 @@ func FromEnv(port int, api bool) (Config, error) {
 	case "kubernetes":
 		pod := os.Getenv("POD_NAME")
 		if pod == "" {
-			return c, fmt.Errorf("Kubernetes discovery requires POD_NAME, POD_NAMESPACE and PEER_SERVICE")
+			return c, fmt.Errorf("Kubernetes discovery requires POD_NAME, POD_NAMESPACE and CLUSTER_SERVICE")
 		}
 		c.SelfID = c.Namespace + "/" + pod
 	case "static":
@@ -111,16 +112,16 @@ func FromEnv(port int, api bool) (Config, error) {
 			return c, err
 		}
 		c.SelfID = address
-		peers := os.Getenv("PEERS")
-		if peers == "" {
-			peers = self
+		members := os.Getenv("MEMBERS")
+		if members == "" {
+			members = self
 		}
-		for _, raw := range strings.Split(peers, ",") {
+		for _, raw := range strings.Split(members, ",") {
 			address, err := staticAddress(strings.TrimSpace(raw))
 			if err != nil {
 				return c, err
 			}
-			c.Members = append(c.Members, peer.Member{ID: address, Address: address})
+			c.Members = append(c.Members, cluster.Member{ID: address, Address: address})
 		}
 	}
 	if err := c.Validate(); err != nil {
@@ -134,8 +135,8 @@ func FromEnv(port int, api bool) (Config, error) {
 // source. Zero TTL/miss/write budgets retain their component defaults; zero
 // SourceMaxPending means no queue. Listener port zero requests an ephemeral port.
 func (c Config) Validate() error {
-	if err := validateListenAddr(c.PeerAddr); err != nil {
-		return fmt.Errorf("invalid PeerAddr")
+	if err := validateListenAddr(c.ClusterAddr); err != nil {
+		return fmt.Errorf("invalid ClusterAddr")
 	}
 	if c.API || c.APIAddr != "" {
 		if err := validateListenAddr(c.APIAddr); err != nil {
@@ -151,17 +152,8 @@ func (c Config) Validate() error {
 	if c.ProfileContention && c.DebugAddr == "" {
 		return fmt.Errorf("contention profiling requires DEBUG_ADDR")
 	}
-	if c.ReadRoutingMode != "" && c.ReadRoutingMode != "peer" && c.ReadRoutingMode != "gateway" {
-		return fmt.Errorf("unsupported READ_ROUTING_MODE")
-	}
 	if c.CacheBytes < 1<<20 || c.CacheBytes > 128<<20 {
 		return fmt.Errorf("invalid CACHE_BYTES")
-	}
-	if c.HotCacheBytes < 0 || c.HotCacheBytes >= c.CacheBytes {
-		return fmt.Errorf("invalid HOT_CACHE_BYTES")
-	}
-	if c.ReadRoutingMode == "gateway" && c.HotCacheBytes != 0 {
-		return fmt.Errorf("gateway routing requires HOT_CACHE_BYTES=0")
 	}
 	if c.TTL < 0 || c.TTL > time.Hour {
 		return fmt.Errorf("invalid TTL_SECONDS")
@@ -182,8 +174,8 @@ func (c Config) Validate() error {
 	case "static":
 	case "kubernetes":
 		namespace, pod, ok := strings.Cut(c.SelfID, "/")
-		if c.Namespace == "" || c.PeerService == "" || !ok || namespace != c.Namespace || pod == "" || strings.Contains(pod, "/") {
-			return fmt.Errorf("Kubernetes discovery requires namespace/pod SelfID, POD_NAMESPACE and PEER_SERVICE")
+		if c.Namespace == "" || c.ClusterService == "" || !ok || namespace != c.Namespace || pod == "" || strings.Contains(pod, "/") {
+			return fmt.Errorf("Kubernetes discovery requires namespace/pod SelfID, POD_NAMESPACE and CLUSTER_SERVICE")
 		}
 	default:
 		return fmt.Errorf("unsupported DISCOVERY_MODE")
@@ -239,12 +231,12 @@ func validateDebugAddr(address string) error {
 func staticAddress(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
-		return "", fmt.Errorf("invalid static peer address")
+		return "", fmt.Errorf("invalid static member address")
 	}
 	host, port, err := net.SplitHostPort(u.Host)
 	number, e := strconv.Atoi(port)
 	if err != nil || e != nil || host == "" || number < 1 || number > 65535 {
-		return "", fmt.Errorf("invalid static peer address")
+		return "", fmt.Errorf("invalid static member address")
 	}
 	return net.JoinHostPort(strings.ToLower(host), strconv.Itoa(number)), nil
 }

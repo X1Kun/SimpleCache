@@ -29,9 +29,6 @@ func validateSpec(cr *cachev1.SimpleCache) error {
 	if strings.TrimSpace(cr.Spec.Image) == "" || cr.Spec.Size < 1 || cr.Spec.Size > 10 || cr.Spec.CacheBytes < 1<<20 || cr.Spec.CacheBytes > 128<<20 || cr.Spec.TTLSeconds < 1 || cr.Spec.TTLSeconds > 3600 {
 		return fmt.Errorf("image, replica count, cache capacity or TTL is invalid")
 	}
-	if cr.Spec.HotCacheBytes < 0 || cr.Spec.HotCacheBytes >= cr.Spec.CacheBytes {
-		return fmt.Errorf("hotCacheBytes must be nonnegative and below cacheBytes")
-	}
 	if cr.Spec.MaxMissWaiters < 1 || cr.Spec.MaxMissWaiters > 4096 || cr.Spec.MaxConcurrentWrites < 1 || cr.Spec.MaxConcurrentWrites > 256 {
 		return fmt.Errorf("miss waiter or write concurrency budget is invalid")
 	}
@@ -89,9 +86,6 @@ func validateGateway(cr *cachev1.SimpleCache) error {
 		}
 		if len(cr.Name) > 55 || len(validation.IsDNS1123Label(cr.Name)) != 0 {
 			return fmt.Errorf("gateway mode requires a DNS label name of at most 55 characters")
-		}
-		if cr.Spec.HotCacheBytes != 0 {
-			return fmt.Errorf("gateway mode requires hotCacheBytes=0")
 		}
 	}
 	return nil

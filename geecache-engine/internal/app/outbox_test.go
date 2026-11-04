@@ -8,13 +8,13 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/outbox"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
 )
 
 func TestOutboxSenderRequiresReadyNonemptyCapturedDirectory(t *testing.T) {
 	group := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) { return []byte("value"), nil }), cache.Options{})
-	router := peer.NewDirectory("self", time.Second, "token")
+	router := cluster.NewDirectory("self", time.Second, "token")
 	defer router.Close()
 	event := outbox.Event{ID: 1, Key: "key", Version: 1}
 	if err := outboxSender(func() bool { return false }, group, router)(context.Background(), event); err == nil {
@@ -23,7 +23,7 @@ func TestOutboxSenderRequiresReadyNonemptyCapturedDirectory(t *testing.T) {
 	if err := outboxSender(func() bool { return true }, group, router)(context.Background(), event); err == nil {
 		t.Fatal("empty discovery acknowledged")
 	}
-	if err := router.Update([]peer.Member{{ID: "self", Address: "127.0.0.1:8001"}}); err != nil {
+	if err := router.Update([]cluster.Member{{ID: "self", Address: "127.0.0.1:8001"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := outboxSender(func() bool { return true }, group, router)(context.Background(), event); err != nil {

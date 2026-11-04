@@ -1,4 +1,4 @@
-package peer
+package cluster
 
 import (
 	"context"
@@ -29,11 +29,11 @@ type InvalidationReport struct {
 // Invalidate uses one immutable membership snapshot. The initiating node is
 // always invalidated, even when it is absent from discovery. Remote handlers
 // perform local invalidation only. This is best effort, not reliable messaging.
-func (r *Router) Invalidate(ctx context.Context, group *cache.Group, key string) (InvalidationReport, error) {
+func (r *Directory) Invalidate(ctx context.Context, group *cache.Group, key string) (InvalidationReport, error) {
 	return r.InvalidateVersion(ctx, group, key, 0)
 }
 
-func (r *Router) InvalidateVersion(ctx context.Context, group *cache.Group, key string, version int64) (InvalidationReport, error) {
+func (r *Directory) InvalidateVersion(ctx context.Context, group *cache.Group, key string, version int64) (InvalidationReport, error) {
 	if err := group.InvalidateVersion(key, version); err != nil {
 		return InvalidationReport{}, err
 	}
@@ -113,7 +113,7 @@ func (c *Client) InvalidateVersion(ctx context.Context, group, key string, versi
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusNoContent {
-		return errors.New("peer did not acknowledge invalidation")
+		return errors.New("member did not acknowledge invalidation")
 	}
 	if version > 0 {
 		ack, err := ParseInvalidationVersion(response.Header)

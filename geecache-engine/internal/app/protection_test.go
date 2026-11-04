@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
-	"github.com/X1Kun/simpleCache/geecache-engine/internal/peer"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/cluster"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/telemetry"
 )
 
@@ -78,7 +78,7 @@ func TestWriteAndBroadcastTimingsDescribeSeparatePhases(t *testing.T) {
 	defer close(store.release)
 	group := cache.NewGroup("products", 1024, store, cache.Options{})
 	m := telemetry.New()
-	router := peer.NewRouterWithToken("local", time.Second, "test-token")
+	router := cluster.NewDirectory("local", time.Second, "test-token")
 	defer router.Close()
 	broadcast, releasePeer := make(chan struct{}), make(chan struct{}, 1)
 	defer close(releasePeer)
@@ -90,14 +90,14 @@ func TestWriteAndBroadcastTimingsDescribeSeparatePhases(t *testing.T) {
 		case <-r.Context().Done():
 			return
 		}
-		w.Header().Set(peer.InvalidationVersionHeader, r.Header.Get(peer.InvalidationVersionHeader))
+		w.Header().Set(cluster.InvalidationVersionHeader, r.Header.Get(cluster.InvalidationVersionHeader))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	if err := router.Update([]peer.Member{{ID: "slow", Address: strings.TrimPrefix(server.URL, "http://")}}); err != nil {
+	if err := router.Update([]cluster.Member{{ID: "slow", Address: strings.TrimPrefix(server.URL, "http://")}}); err != nil {
 		t.Fatal(err)
 	}
-	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Router: router, Token: "test-token"})
+	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Directory: router, Token: "test-token"})
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- productRequest(handler, "PUT", "/api?key=key", `{"v":1}`, "test-token", "*") }()
 	select {
@@ -152,13 +152,13 @@ func TestWriteAdmissionRejectsBeforeBodyAndKeepsHitsAndProbes(t *testing.T) {
 	store := &heldWriteSource{memoryProducts: &memoryProducts{values: map[string][]byte{"warm": []byte(`{}`)}}, entered: make(chan struct{}), release: make(chan struct{}, 1)}
 	defer close(store.release)
 	group := cache.NewGroup("products", 1024, store, cache.Options{})
-	if _, err := group.GetLocal(context.Background(), "warm"); err != nil {
+	if _, err := group.Get(context.Background(), "warm"); err != nil {
 		t.Fatal(err)
 	}
 	m := telemetry.New()
-	router := peer.NewRouterWithToken("local", time.Second, "test-token")
+	router := cluster.NewDirectory("local", time.Second, "test-token")
 	defer router.Close()
-	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Router: router, Token: "test-token", MaxConcurrentWrites: 1})
+	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Directory: router, Token: "test-token", MaxConcurrentWrites: 1})
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- productRequest(handler, "PUT", "/api?key=first", `{}`, "test-token", "*") }()
 	select {
@@ -205,9 +205,9 @@ func TestKnownConflictIsNotAnUnknownCommit(t *testing.T) {
 	store := &memoryProducts{values: map[string][]byte{"key": []byte(`{}`)}}
 	group := cache.NewGroup("products", 1024, store, cache.Options{})
 	m := telemetry.New()
-	router := peer.NewRouterWithToken("local", time.Second, "test-token")
+	router := cluster.NewDirectory("local", time.Second, "test-token")
 	defer router.Close()
-	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Router: router, Token: "test-token"})
+	handler := APIHandler(group, func() bool { return true }, m, APIOptions{Store: store, Directory: router, Token: "test-token"})
 	if w := productRequest(handler, "PUT", "/api?key=key", `{}`, "test-token", `"v2"`); w.Code != 412 {
 		t.Fatal(w.Code)
 	}
@@ -250,7 +250,7 @@ func TestAPIMissOverloadHasRetryHintAndObservableCapacity(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("read did not start")
 	}
-	if readMetric(t, m, "simplecache_api_miss_waiters", "").value != 1 || readMetric(t, m, "simplecache_route_tasks_inflight", "").value != 1 {
+	if readMetric(t, m, "simplecache_api_miss_waiters", "").value != 1 || readMetric(t, m, "simplecache_source_inflight", "").value != 1 {
 		t.Fatal("miss capacity not observable")
 	}
 	w := productRequest(handler, "GET", "/api?key=excess", "", "")
@@ -271,7 +271,7 @@ func TestAPIMissOverloadHasRetryHintAndObservableCapacity(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("read did not finish")
 	}
-	if readMetric(t, m, "simplecache_admission_rejections_total", "api_waiter").value != 1 || readMetric(t, m, "simplecache_api_miss_waiters", "").value != 0 || readMetric(t, m, "simplecache_route_tasks_inflight", "").value != 0 {
+	if readMetric(t, m, "simplecache_admission_rejections_total", "api_waiter").value != 1 || readMetric(t, m, "simplecache_api_miss_waiters", "").value != 0 || readMetric(t, m, "simplecache_source_pending", "").value != 0 {
 		t.Fatal("rejection missing or read capacity leaked")
 	}
 }

@@ -19,7 +19,7 @@ FIELDS = [
     'process_cpu_seconds_total', 'process_resident_memory_bytes',
     'process_start_time_seconds', 'go_memstats_heap_alloc_bytes',
     'go_memstats_alloc_bytes_total', 'go_goroutines', 'go_gc_duration_seconds_count',
-    'simplecache_source_loads_total', 'simplecache_peer_requests_total',
+    'simplecache_source_loads_total',
     'simplecache_source_pending', 'simplecache_source_inflight',
     'simplecache_cache_bytes', 'simplecache_cache_removals_total',
     'simplecache_admission_rejections_total', 'simplecache_api_miss_waiters',

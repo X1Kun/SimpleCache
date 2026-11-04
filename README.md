@@ -52,7 +52,7 @@ flowchart TB
 | Outbox 后台任务 | 运行在缓存实例中，领取通知事件并重试；实例故障后由其他实例接续 |
 | Operator 与服务发现 | Operator 管理部署资源；缓存实例通过 EndpointSlice 发现失效通知的目标成员 |
 
-项目默认使用 **Peer 模式**，无需 Envoy：客户端访问任一缓存 API，未命中时按一致性哈希找到负责该键的实例。Gateway 模式把分片选择前移到代理，缓存实例直接处理本地读取，减少一次实例间的读取转发。两种模式共用数据库和版本失效机制。
+实例统一读取本地缓存并在未命中时回源 PostgreSQL。多实例按 key 分片由 Gateway 完成；实例间仅传递版本失效通知。单实例可直接访问 API，无需 Gateway。无 Gateway 的多实例为独立缓存副本。
 
 ## 读写如何工作
 
@@ -101,12 +101,12 @@ curl -fsS 'http://localhost:9999/api?key=Auto-666'
 
 ### 三实例与 PostgreSQL
 
-在仓库根目录启动 Compose 示例，使用默认 Peer 模式：
+在仓库根目录启动 Compose 示例，作为独立本地缓存副本运行：
 
 ```bash
 docker compose -f deploy/products/compose.yaml up -d --build
 curl -fsS http://127.0.0.1:19999/readyz
-curl -fsS 'http://127.0.0.1:19999/api?key=product:42'
+curl -fsS 'http://127.0.0.1:19999/api?key=product%3A42'
 ```
 
 使用结束后关闭资源，保留数据库卷：
@@ -125,7 +125,6 @@ make test-operator-ci              # Operator 测试
 make gateway-smoke                 # 真实 Gateway 与 PostgreSQL 集群冒烟验证
 make gateway-experiments           # 并发、通知丢失与故障恢复场景
 make gateway-perf                  # 随机路由与哈希路由的对照实验
-make postgres-compare COMPARE_QUICK=1  # PostgreSQL 路径快速验证
 ```
 
 测试覆盖版本冲突、旧响应晚到、重复和乱序通知、提交后崩溃、Outbox 重放及过载保护。集群实验使用独立的临时 Kind 环境，报告保存在 `bin/reports/`。功能测试通过不代表已经测得容量上限，具体证据与限制见[验证说明](docs/design.zh-CN.md#validation-and-evidence)。

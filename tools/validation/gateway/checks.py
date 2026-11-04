@@ -52,8 +52,6 @@ class GatewayChecks:
                 text = urllib.request.urlopen(base + '/metrics', timeout=5).read().decode()
                 (self.report / (label + '-' + pod['metadata']['name'] + '-metrics.txt')).write_text(text)
                 for line in text.splitlines():
-                    if line.startswith('simplecache_peer_requests_total{') or (line.startswith('simplecache_local_lookups_total{') and 'kind="peer"' in line):
-                        assert float(line.rsplit(' ', 1)[1]) == 0, line
                     if line.startswith('simplecache_source_loads_total{'):
                         source_loads += float(line.rsplit(' ', 1)[1])
                     if line.startswith('simplecache_local_lookups_total{') and 'kind="api"' in line:
