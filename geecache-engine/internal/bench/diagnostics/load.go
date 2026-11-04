@@ -8,22 +8,19 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/bench/democlient"
+	"github.com/X1Kun/simpleCache/geecache-engine/internal/bench/measurement"
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/demo"
 )
 
 func newClient(workers int) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.MaxIdleConns = workers + 4
-	transport.MaxIdleConnsPerHost = workers + 4
-	return &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	return democlient.NewClient(workers, 3*time.Second)
 }
 
 func waitReady(ctx context.Context, c *http.Client, origin string) error {
@@ -50,20 +47,8 @@ func waitReady(ctx context.Context, c *http.Client, origin string) error {
 }
 
 func readValue(ctx context.Context, client *http.Client, origin, key string, valueBytes int) (bad, wrong bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/api?key="+key, nil)
-	if err != nil {
-		return true, false
-	}
-	r, err := client.Do(req)
-	if err != nil {
-		return true, false
-	}
-	defer r.Body.Close()
-	b, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
-	if err != nil || r.StatusCode != 200 {
-		return true, false
-	}
-	return false, string(b) != demo.AutoValue(key, valueBytes)
+	result := democlient.Read(ctx, client, origin, key, valueBytes)
+	return result.Failed, result.Incorrect
 }
 
 func warmup(ctx context.Context, c *http.Client, origin string, count, valueBytes, workers int) error {
@@ -233,11 +218,9 @@ func load(ctx context.Context, c *http.Client, origin string, o Options, dir str
 	<-sampled
 	trial.Seconds = time.Since(start).Seconds()
 	trial.Requests = len(durations)
-	sort.Float64s(durations)
-	if len(durations) > 0 {
-		p := func(q float64) float64 { return durations[int(float64(len(durations)-1)*q)] }
-		trial.P50, trial.P95, trial.P99 = p(.5), p(.95), p(.99)
-	}
+	q := measurement.Quantiles(durations)
+	trial.P50, trial.P95, trial.P99 = q.P50, q.P95, q.P99
+
 	if trial.Scenario == "distinct-keys" && next.Load() >= demo.AutoKeys {
 		return errors.New("finite cold dataset exhausted; reduce workers/duration")
 	}

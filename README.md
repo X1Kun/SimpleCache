@@ -4,6 +4,8 @@ SimpleCache 是一个用 Go 实现的分布式加载式缓存，配套 Kubernete
 
 **PostgreSQL 保存业务数据和版本，缓存实例按键分担读取压力。** 读取未命中时从数据库加载；写入先提交数据库，再通知各实例清除旧缓存。事务 Outbox 持久化通知事件，让写入实例故障后仍能继续投递。
 
+引擎的服务、压测、诊断和报告入口见 [cmd 角色说明](geecache-engine/cmd/README.md)。
+
 ## 整体架构
 
 下面展示可选的 **Gateway 模式：两个代理实例、三个缓存分片、一个共享 PostgreSQL**。
@@ -83,6 +85,24 @@ sequenceDiagram
 **一致性边界：** 这里不提供强一致读，写入后可能短暂读到旧缓存。通知完成只覆盖当次已发现的成员；离线或未发现的旧缓存仍依赖 TTL 过期恢复。一份 Outbox 队列服务于同一个缓存集群。
 
 ## 快速开始
+
+### 完整开发环境（首选）
+
+使用独立 Kind 集群启动 Gateway、Operator、带 PVC 的 PostgreSQL 和缓存集群：
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r tools/requirements.txt
+make dev-up
+make dev-status
+curl -fsS 'http://127.0.0.1:18080/api?key=product%3A42'
+make dev-down   # 停止业务，保留 Kind 集群、数据库 PVC 和凭据
+```
+
+再次 `make dev-up` 恢复；`make dev-schema-upgrade` 显式升级已有库，
+`make dev-destroy` 才销毁集群及其数据。完整的依赖、存储、访问和生命周期说明见
+[开发部署指南](deploy/system/README.md)。开发入口保留环境，验证入口复用基础定义并在结束后清理。
 
 ### 本地单实例
 

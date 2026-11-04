@@ -1,9 +1,6 @@
 package gateway
 
-import (
-	"math"
-	"sort"
-)
+import "github.com/X1Kun/simpleCache/geecache-engine/internal/bench/measurement"
 
 type Record struct {
 	Dispatched  bool    `json:"dispatched,omitempty"`
@@ -29,22 +26,9 @@ type Record struct {
 	StaleAtStart     bool    `json:"stale_at_start"`
 }
 
-type Percentiles struct {
-	Count int     `json:"count"`
-	P50   float64 `json:"p50_ms"`
-	P95   float64 `json:"p95_ms"`
-	P99   float64 `json:"p99_ms"`
-}
+type Percentiles = measurement.Percentiles
 
-func Quantiles(values []float64) Percentiles {
-	if len(values) == 0 {
-		return Percentiles{}
-	}
-	v := append([]float64(nil), values...)
-	sort.Float64s(v)
-	at := func(p float64) float64 { return v[int(math.Ceil(p*float64(len(v))))-1] }
-	return Percentiles{len(v), at(.5), at(.95), at(.99)}
-}
+func Quantiles(values []float64) Percentiles { return measurement.Quantiles(values) }
 
 type Summary struct {
 	Arrival          *ArrivalReport `json:"arrival,omitempty"`

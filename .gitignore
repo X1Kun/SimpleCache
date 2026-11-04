@@ -23,3 +23,6 @@ geecache-server
 # Local Python validation imports.
 __pycache__/
 *.pyc
+
+# Local validation Python environment.
+.venv/

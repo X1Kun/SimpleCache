@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.request
 
+from ..environment.fixtures import deploy_benchmark
 from .helpers import literal, metric, source, sql
 from ..reporting.outcome import summarize_outcome
 
@@ -260,12 +261,7 @@ def measure(m: GatewayRun, proxies, previous=None):
         with (m.report/'client-build.log').open('w') as log:
             subprocess.run(['go','build','-o',str(binary),'./cmd/gateway-bench'],cwd=m.root/'geecache-engine',env=environment,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=180)
     m.results['client_sha256']=hashlib.sha256(binary.read_bytes()).hexdigest()
-    m.apply({'apiVersion':'v1','kind':'Pod','metadata':{'name':'gateway-bench','labels':{'app':'gateway-bench'}},'spec':{
-        'containers':[{'name':'client','image':'simplecache-engine:gateway','command':['/bin/sh','-c','sleep 86400'],
-                       'env':[{'name':'GOMAXPROCS','value':'1'},{'name':'CACHE_ADMIN_TOKEN','valueFrom':{'secretKeyRef':{'name':'products','key':'CACHE_ADMIN_TOKEN'}}}],
-                       'resources':{'requests':{'cpu':'500m','memory':'128Mi'},'limits':{'cpu':'1','memory':'256Mi'}}}],
-        'securityContext':{'runAsUser':65532,'runAsGroup':65532}}})
-    m.k('wait','--for=condition=Ready','pod/gateway-bench','--timeout=120s')
+    deploy_benchmark(m, 'performance')
     m.k('cp',str(binary),'gateway-bench:/tmp/gateway-bench')
     options={'keys':512,'value_bytes':4096,'reads':reads,'workers':8,'think_ms':1,'seed':42,'windows':128,'duration_seconds':0}
     manifest={'endpoint':endpoint,'service':service['metadata']['name'],'repeats':repeats,'options':options,

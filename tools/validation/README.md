@@ -37,7 +37,7 @@ new modules. New implementation belongs here. The fixed-release downloader
 remains `scripts/gateway/fetch.sh`, shared with Operator envtest.
 
 Go workload clients remain in the engine module under `internal/bench`
-(`gateway`, `postgres`, `diagnostics`). Go test/profile evidence aggregation
+(`gateway`, `diagnostics`). Go test/profile evidence aggregation
 lives in `internal/validation/report`, and adversarial tests in
 `internal/validation/scenarios`. The existing `cmd` binary names remain stable.
 This refactor does not change workload generation, request validation, cache
@@ -50,3 +50,32 @@ documented in [arrival experiments](../../docs/experiments/arrival.md).
 `make gateway-arrival` runs fixed-rate workloads through an owned Kind Gateway
 with separate client, cache and PostgreSQL Pods. See
 [Kind arrival experiments](../../docs/experiments/arrival-kind.md).
+
+## Declarative fixtures
+
+Use Python 3.10+ and install the validation-only YAML dependency before running
+these tools (CI installs the same pinned version):
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r tools/requirements.txt
+make gateway-test
+```
+
+Alternatively select an existing environment with `make gateway-test
+PYTHON=/path/to/python`; the other Python experiment targets accept the same
+`PYTHON` variable. Do not commit a local virtual environment.
+
+Product defaults and complete provisioning live in `deploy/system/` and
+`tools/system/`. Validation imports that workflow and applies explicit ephemeral
+storage, TTL/capacity and test-only Kind overrides; it does not own another
+SimpleCache deployment definition. `fixtures/benchmark.yaml` remains a shared
+benchmark Pod; `fixtures/kind-overrides.yaml` contains only disposable etcd
+patches. SQL still comes from `deploy/products/schema.sql`.
+
+The run saves rendered resource JSON with Secret payloads redacted. Credentials
+are passed only to kubectl stdin. Benchmark CPU/GOMAXPROCS/auth profiles remain
+explicit; Envoy embedded YAML is updated by parsed fields. The retained daily
+entrypoints and persistent-data semantics are documented in
+[the development deployment guide](../../deploy/system/README.md).

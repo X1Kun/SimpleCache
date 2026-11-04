@@ -47,6 +47,8 @@ operator_tests() {
   cp "$project_root/simplecache-operator/cover.out" "$report_dir/operator-coverage.out"
 }
 diagnostics() {
+  # Functional scenarios: profiles include the test client and assertions.
+  # Use the separate-process perf mode for server measurements.
   cd "$project_root/geecache-engine"
   go test -json -count=1 -timeout=2m -o "$report_dir/scenarios.test" \
     -cpuprofile="$report_dir/cpu.pprof" -memprofile="$report_dir/heap.pprof" \
