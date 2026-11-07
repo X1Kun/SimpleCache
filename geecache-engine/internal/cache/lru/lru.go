@@ -9,7 +9,7 @@ import (
 type Cache struct {
 	bytesTotal   int64
 	byteNow      int64
-	ll           *list.List
+	ll           *list.List // Front is most recently used; Back is oldest.
 	cache        map[string]*list.Element
 	onEvicted    func(key string, value Value) // Callback invoked when an entry is removed.
 	expireCursor *list.Element

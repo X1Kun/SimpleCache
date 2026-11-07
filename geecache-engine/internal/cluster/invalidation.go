@@ -88,6 +88,14 @@ func (r *Directory) InvalidateVersion(ctx context.Context, group *cache.Group, k
 
 const InvalidationTimeout = time.Second
 
+// Client sends invalidations to one member using the directory's shared HTTP client.
+type Client struct {
+	address string
+	http    *http.Client
+	timeout time.Duration
+	token   string
+}
+
 func (c *Client) Invalidate(ctx context.Context, group, key string) error {
 	return c.InvalidateVersion(ctx, group, key, 0)
 }

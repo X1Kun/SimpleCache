@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"net/http"
@@ -36,4 +37,18 @@ func ParseInvalidationVersion(header http.Header) (int64, error) {
 func Authorized(r *http.Request, token string) bool {
 	return token != "" && subtle.ConstantTimeCompare(
 		[]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) == 1
+}
+
+// Status maps notification errors to HTTP response codes.
+func Status(err error) int {
+	switch {
+	case errors.Is(err, cache.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, cache.ErrInvalidKey), errors.Is(err, cache.ErrInvalidVersion):
+		return http.StatusBadRequest
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusServiceUnavailable
+	}
 }
