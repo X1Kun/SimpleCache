@@ -207,6 +207,22 @@ func TestFloorCapacityAndDuplicateRetentionOrder(t *testing.T) {
 	if err := g.InvalidateVersion("bad", -1); !errors.Is(err, ErrInvalidVersion) {
 		t.Fatal(err)
 	}
+
+	t.Run("advancing retains the floor ahead of unchanged records", func(t *testing.T) {
+		g := NewGroup("advance", 1024, GetterFunc(func(context.Context, string) ([]byte, error) { return nil, ErrNotFound }), Options{})
+		g.floors.capacity = 2
+		for _, event := range []versionRecord{{"a", 1}, {"b", 1}, {"a", 2}, {"c", 1}} {
+			if err := g.InvalidateVersion(event.key, event.version); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if g.knownVersion("a") != 2 || g.knownVersion("b") != 0 || g.knownVersion("c") != 1 {
+			t.Fatal("advancing a floor did not preserve it over an unchanged record")
+		}
+		if stats := g.Stats(); stats.VersionRecords != 2 || stats.VersionEvictions != 1 {
+			t.Fatal("unexpected floor retirement", stats)
+		}
+	})
 }
 
 func TestVersionComparisonDoesNotRefreshCacheRecencyOrTTL(t *testing.T) {

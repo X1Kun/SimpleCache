@@ -30,7 +30,7 @@ type versionRecord struct {
 type versionFloors struct {
 	capacity  int
 	entries   map[string]*list.Element
-	advanced  list.List
+	advanced  list.List // Front is most recently inserted/advanced; Back is oldest.
 	evictions uint64
 }
 
@@ -60,7 +60,7 @@ func (g *Group) rememberVersionLocked(key string, version int64) {
 			record := e.Value.(versionRecord)
 			record.version = version
 			e.Value = record
-			f.advanced.MoveToBack(e)
+			f.advanced.MoveToFront(e)
 		}
 		return // Replayed notifications and reads do not prolong retention.
 	}
@@ -68,7 +68,7 @@ func (g *Group) rememberVersionLocked(key string, version int64) {
 		f.entries = make(map[string]*list.Element)
 	}
 	if len(f.entries) == f.capacity {
-		old := f.advanced.Front()
+		old := f.advanced.Back()
 		forgotten := old.Value.(versionRecord).key
 		delete(f.entries, forgotten)
 		f.advanced.Remove(old)
@@ -80,7 +80,7 @@ func (g *Group) rememberVersionLocked(key string, version int64) {
 	// Request paths/query values can be slices of a much larger URI. Retain
 	// only the bounded key bytes, including when later advancing this record.
 	owned := strings.Clone(key)
-	f.entries[owned] = f.advanced.PushBack(versionRecord{owned, version})
+	f.entries[owned] = f.advanced.PushFront(versionRecord{owned, version})
 }
 
 // InvalidateVersion accepts the committed source generation; zero forces a

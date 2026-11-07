@@ -311,27 +311,6 @@ func TestCallerDisconnectDoesNotCancelPostCommitBroadcast(t *testing.T) {
 	}
 }
 
-func TestPostgresConfigurationRequiresExplicitCredentials(t *testing.T) {
-	t.Setenv("SOURCE_MODE", "postgres")
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("CACHE_ADMIN_TOKEN", "")
-	if _, err := FromEnv(8001, true); err == nil {
-		t.Fatal("missing PostgreSQL credentials accepted")
-	}
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	if _, err := FromEnv(8001, true); err == nil {
-		t.Fatal("writable mode without an admin token accepted")
-	}
-	t.Setenv("CACHE_ADMIN_TOKEN", "test-token")
-	if _, err := FromEnv(8001, true); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SOURCE_MODE", "unknown")
-	if _, err := FromEnv(8001, true); err == nil {
-		t.Fatal("unknown source accepted")
-	}
-}
-
 func TestMutationCoordinatorPreservesCommitAndInvalidationOutcomes(t *testing.T) {
 	for _, name := range []string{"committed", "conflict", "unknown", "notification-only"} {
 		t.Run(name, func(t *testing.T) {

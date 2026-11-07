@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,17 @@ import (
 
 	"github.com/X1Kun/simpleCache/geecache-engine/internal/cache"
 )
+
+type fixedVersionSource struct{ version int64 }
+
+func (s fixedVersionSource) Get(context.Context, string) ([]byte, error) { return []byte("value"), nil }
+func (s fixedVersionSource) GetVersioned(context.Context, string) (cache.SourceValue, error) {
+	return cache.SourceValue{Value: []byte("value"), Version: s.version}, nil
+}
+
+func clientFor(server *httptest.Server) *Client {
+	return &Client{address: strings.TrimPrefix(server.URL, "http://"), http: server.Client(), timeout: time.Second}
+}
 
 func TestBroadcastInvalidatesEveryKnownCopyAndReportsFailures(t *testing.T) {
 	const token = "test-token"
@@ -52,48 +64,52 @@ func TestBroadcastInvalidatesEveryKnownCopyAndReportsFailures(t *testing.T) {
 	}
 }
 
-func TestMemberInvalidationRequiresTokenAndNeverForwards(t *testing.T) {
-	g := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
-		return []byte("value"), nil
-	}), cache.Options{})
-	_, _ = g.Get(context.Background(), "key")
-	for _, tc := range []struct {
-		token  string
-		status int
-	}{{"", 401}, {"wrong", 401}, {"shared-token", 204}, {"shared-token", 204}} {
-		req := httptest.NewRequest(http.MethodDelete, BasePath+"products/key", nil)
-		req.Header.Set("Authorization", "Bearer "+tc.token)
-		w := httptest.NewRecorder()
-		NewHandlerWithToken("shared-token", g).ServeHTTP(w, req)
-		if w.Code != tc.status {
-			t.Fatalf("status=%d want=%d", w.Code, tc.status)
+func TestVersionedBroadcastReportsLegacyMembersWithoutClaimingVersionSupport(t *testing.T) {
+	local := cache.NewGroup("products", 1024, fixedVersionSource{1}, cache.Options{})
+	remote := cache.NewGroup("products", 1024, fixedVersionSource{1}, cache.Options{})
+	_, _ = local.Get(context.Background(), "key")
+	_, _ = remote.Get(context.Background(), "key")
+	modern := httptest.NewServer(NewHandlerWithToken("token", remote))
+	defer modern.Close()
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(InvalidationVersionHeader) != "2" {
+			t.Errorf("missing committed version: %v", r.Header)
 		}
+		w.WriteHeader(204) // Older binaries delete the key but do not retain a floor.
+	}))
+	defer legacy.Close()
+	router := NewDirectory("local", time.Second, "token")
+	defer router.Close()
+	if e := router.Update([]Member{{ID: "modern", Address: strings.TrimPrefix(modern.URL, "http://")}, {ID: "legacy", Address: strings.TrimPrefix(legacy.URL, "http://")}}); e != nil {
+		t.Fatal(e)
 	}
-	if g.Stats().Entries != 0 {
-		t.Fatal("cache not invalidated")
+	report, e := router.InvalidateVersion(context.Background(), local, "key", 2)
+	if e != nil || report.Version != 2 || report.Complete || len(report.Results) != 3 {
+		t.Fatal(report, e)
 	}
-	w := httptest.NewRecorder()
-	NewHandler(g).ServeHTTP(w, httptest.NewRequest(http.MethodDelete, BasePath+"products/key", nil))
-	if w.Code != http.StatusMethodNotAllowed {
-		t.Fatal("read-only member accepted mutation")
+	statuses := map[string]string{}
+	for _, r := range report.Results {
+		statuses[r.Node] = r.Status
+	}
+	if statuses["local"] != "ok" || statuses["modern"] != "ok" || statuses["legacy"] != "unversioned" {
+		t.Fatal(report)
+	}
+	if local.Stats().Entries != 0 || remote.Stats().Entries != 0 {
+		t.Fatal("local or remote entry survived")
 	}
 }
 
-func clientFor(server *httptest.Server) *Client {
-	return &Client{address: strings.TrimPrefix(server.URL, "http://"), http: server.Client(), timeout: time.Second}
-}
-
-func TestMemberTransportNeverServesReads(t *testing.T) {
-	g := cache.NewGroup("products", 1024, cache.GetterFunc(func(context.Context, string) ([]byte, error) {
-		t.Fatal("notification transport loaded source")
-		return nil, nil
-	}), cache.Options{})
-	h := NewHandlerWithToken("token", g)
-	for _, path := range []string{BasePath + "products/key", "/_geecache/products/key"} {
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-		if w.Code != 405 || w.Header().Get("Allow") != "DELETE" {
-			t.Fatal(path, w.Code, w.Header())
-		}
+func TestVersionedInvalidationClientRequiresMatchingAcknowledgement(t *testing.T) {
+	for _, ack := range []string{"", "1", "03", "3,3"} {
+		t.Run(ack, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set(InvalidationVersionHeader, ack)
+				w.WriteHeader(204)
+			}))
+			defer server.Close()
+			if e := clientFor(server).InvalidateVersion(context.Background(), "products", "key", 3); !errors.Is(e, ErrUnversionedInvalidation) {
+				t.Fatal(e)
+			}
+		})
 	}
 }

@@ -17,6 +17,25 @@ Gateway performs key-based sharding before requests reach the instance. Direct
 access to an arbitrary instance is safe under the weak consistency contract but
 can create independent copies and lose sharding efficiency.
 
+## App source and tests
+
+App tests use their primary source file as a prefix. Larger HTTP and integration
+scenarios keep a descriptive suffix; test functions and shared fixtures remain
+in the same package.
+
+| Source | Tests |
+| --- | --- |
+| `api.go` | `api_test.go` (routes and key validation), `api_protection_test.go` (admission and metrics), `api_response_order_test.go` (lost responses and client version guards) |
+| `bootstrap.go` | `bootstrap_test.go` (listeners and shutdown), `bootstrap_outbox_test.go` (relay sender readiness) |
+| `config.go` | `config_test.go` (environment parsing, validation and source requirements) |
+| `debug.go` | `debug_test.go` (debug address and profile isolation) |
+| `mutations.go` | `mutations_test.go` (coordination and shared product fixtures), `mutations_postgres_integration_test.go` (real source lifecycle), `mutations_delivery_integration_test.go` (response loss, crash recovery and Outbox replay) |
+| `mutations_http.go` | `mutations_http_test.go` (preconditions and concurrent edits), `mutations_http_invalidation_test.go` (version notifications and write validation) |
+
+PostgreSQL integration tests require `SIMPLECACHE_TEST_DATABASE_URL`; they skip
+when no disposable database is configured. The crash-writer subprocess is still
+selected by its test function name, independent of its containing file name.
+
 ## Read and version invariants
 
 Read: canonical API key -> local lookup -> API miss admission -> source flight ->
@@ -30,6 +49,8 @@ minimum version. Source executing/pending work has independent finite bounds.
 checking and fill share `epochMu`, with lock order `epochMu -> cache.mu`.
 Version metadata is bounded to 1,024 records. Retiring a floor advances its epoch
 stripe; an active flight retains its captured minimum even after retirement.
+Both linked lists use Front for newest and Back for oldest: cache reads/writes
+refresh LRU recency; only insertion or a higher floor refreshes version retention.
 Invalidation prevents an old fill but is not a global reader barrier. An older
 already waiting caller can still receive a value under the documented contract.
 
@@ -40,6 +61,16 @@ an owner for reads. Its HTTP handler accepts authenticated DELETE invalidations
 only, at `/_simplecache/invalidate/<group>/<escaped-key>`. GET cannot fetch values.
 EndpointSlice port `cluster` identifies the notification port (normally 8001).
 `CLUSTER_SERVICE` and static `MEMBERS` configure notification recipients only.
+
+The `cluster` files follow the notification flow:
+
+- `directory.go`: member normalization and immutable snapshot publication;
+  `directory_test.go` covers ownership and concurrent reads.
+- `invalidation.go`: the per-member `Client`, bounded broadcast and acknowledgements;
+  `invalidation_test.go` covers sending and delivery reports.
+- `server.go`: authenticated local invalidation handling;
+  `server_test.go` covers request validation, version acknowledgements and read rejection.
+- `protocol.go`: shared paths, headers, authentication and HTTP error mapping.
 
 The API mutation coordinator depends on narrow invalidator/observer interfaces.
 It validates preconditions, writes the source, then invalidates known members.
